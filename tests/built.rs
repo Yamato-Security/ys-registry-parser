@@ -450,14 +450,17 @@ type Item<'a> = (Option<u32>, u32, Option<&'a str>, Vec<String>);
 fn recent_docs_that_dont_add_up() {
     let mut b = Builder::new();
     let doc = |name: &str| utf16z(name);
-    // RecentDocs: its list names a value that isn't there, a value it doesn't list, a value
-    // that isn't a numbered item, an item of the wrong type; .txt: no MRUListEx
+    // RecentDocs: its list names a value that isn't there, a value it doesn't list, duplicate
+    // numbered and list values, a value that isn't numbered, an item of the wrong type; .txt:
+    // no MRUListEx
     let values = [
         b.value("MRUListEx", 3, &mru(&[2, 5, 0, 2]), false),
         b.value("0", 3, &doc("a.txt"), false),
         b.value("2", 3, &doc("b.docx"), false),
+        b.value("2", 3, &doc("duplicate.docx"), false),
         b.value("3", 1, &doc("c.pdf"), false),
         b.value("ViewStream", 3, &[1, 2, 3, 4, 5], false),
+        b.value("MRULISTEX", 3, &mru(&[0]), false),
     ];
     let txt_values = [b.value("0", 3, &doc("a.txt"), false)];
     let txt = b.key(".txt", 0, &[], &txt_values, false);
@@ -479,7 +482,9 @@ fn recent_docs_that_dont_add_up() {
         all.problems,
         [
             "MRUListEx: 2 is listed twice",
-            r#"value "ViewStream" is not a numbered item"#
+            "numbered value 2 is present more than once",
+            r#"value "ViewStream" is not a numbered item"#,
+            "MRUListEx is present more than once"
         ]
     );
     let items: Vec<Item> = all
@@ -507,6 +512,12 @@ fn recent_docs_that_dont_add_up() {
             (Some(2), 0, Some("a.txt"), vec![]),
             (
                 None,
+                2,
+                Some("duplicate.docx"),
+                vec!["another value named 2 already occupies its MRUListEx position".to_owned()]
+            ),
+            (
+                None,
                 3,
                 Some("c.pdf"),
                 vec![
@@ -517,7 +528,7 @@ fn recent_docs_that_dont_add_up() {
         ]
     );
     // the bytes of what doesn't decode are kept
-    assert!(all.items[3].raw.is_some() && all.items[0].raw.is_none());
+    assert!(all.items[4].raw.is_some() && all.items[0].raw.is_none());
     let txt = &lists[1];
     assert_eq!(txt.extension.as_deref(), Some(".txt"));
     assert_eq!(
