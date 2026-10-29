@@ -2,18 +2,35 @@
 #![allow(clippy::unwrap_used)]
 
 use std::io::Read;
+use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::system::{ControlSets, computer_name, services};
 
-fn fixture() -> Vec<u8> {
+fn fixture(name: &str) -> Vec<u8> {
     let path = format!(
-        "{}/tests/fixtures/regipy/SAM.gz",
+        "{}/tests/fixtures/regipy/{name}.gz",
         env!("CARGO_MANIFEST_DIR")
     );
     let mut data = Vec::new();
     flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
         .read_to_end(&mut data)
         .unwrap();
+    data
+}
+
+/// The SYSTEM hive, unpacked once.
+fn system() -> &'static [u8] {
+    static SYSTEM: OnceLock<Vec<u8>> = OnceLock::new();
+    SYSTEM.get_or_init(|| fixture("SYSTEM"))
+}
+
+/// Flip bytes of `data` past its base block.
+fn damage(mut data: Vec<u8>, flips: Vec<(usize, u8)>) -> Vec<u8> {
+    for (at, byte) in flips {
+        let at = 4096 + at % (data.len() - 4096);
+        data[at] = byte;
+    }
     data
 }
 
@@ -30,6 +47,11 @@ fn read_all(data: Vec<u8>) {
         }
     }
     let _ = hive.deleted();
+    let sets = ControlSets::read(&hive);
+    let _ = computer_name(&hive);
+    for set in sets.present {
+        let _ = services(&hive, set);
+    }
 }
 
 proptest! {
@@ -45,11 +67,17 @@ proptest! {
 
     #[test]
     fn a_damaged_hive(flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)) {
-        let mut data = fixture();
-        for (at, byte) in flips {
-            let at = 4096 + at % (data.len() - 4096);
-            data[at] = byte;
-        }
-        read_all(data);
+        read_all(damage(fixture("SAM"), flips));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn a_damaged_system_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        read_all(damage(system().to_vec(), flips));
     }
 }
