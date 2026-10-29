@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use crate::bytes::{u16_at, u32_at, u64_at, utf16_units};
+use crate::data::ValueType;
 use crate::hive::{Hive, Key, Status, Value};
 
 /// Where the local accounts are, under the hive's root.
@@ -203,6 +204,60 @@ pub struct Account {
     pub problems: Vec<String>,
 }
 
+/// The name, RID, key time and replay status of an entry under `Users\Names`.
+type NameEntry = (String, Option<u32>, u64, bool);
+
+/// Read the `Names` entries and the damage that keeps any part from being read.
+fn account_names(key: &Key, problems: &mut Vec<String>) -> Vec<NameEntry> {
+    let (entries, why) = key.subkeys();
+    problems.extend(why.into_iter().map(|w| format!("Names: {w}")));
+    entries
+        .into_iter()
+        .map(|entry| {
+            let (values, why) = entry.values();
+            problems.extend(
+                why.into_iter()
+                    .map(|w| format!(r"Names\{}: {w}", entry.name())),
+            );
+            let defaults: Vec<&Value> = values.iter().filter(|v| v.name().is_empty()).collect();
+            if defaults.is_empty() {
+                problems.push(format!(
+                    r"Names\{}: its default value is not there",
+                    entry.name()
+                ));
+            } else if defaults.len() > 1 {
+                problems.push(format!(
+                    r"Names\{}: its default value is present more than once",
+                    entry.name()
+                ));
+            }
+            let default = defaults.first().copied();
+            if let Some(value) = default {
+                let (bytes, why) = value.read_data();
+                problems.extend(
+                    why.into_iter()
+                        .map(|w| format!(r"Names\{}: {w}", entry.name())),
+                );
+                if !bytes.is_empty() {
+                    problems.push(format!(
+                        r"Names\{}: its default value has {} data bytes, not 0",
+                        entry.name(),
+                        bytes.len()
+                    ));
+                }
+            }
+            let replayed = entry.status() == Status::Replayed
+                || defaults.iter().any(|v| v.status() == Status::Replayed);
+            (
+                entry.name(),
+                default.map(Value::data_type),
+                entry.last_written(),
+                replayed,
+            )
+        })
+        .collect()
+}
+
 /// The local accounts of `hive`, in the order of their keys, then `Names` entries without one,
 /// and what keeps parts of them from being read; `None` when the hive has no
 /// `SAM\Domains\Account\Users` key.
@@ -211,32 +266,28 @@ pub fn accounts(hive: &Hive) -> Option<(Vec<Account>, Vec<String>)> {
     let users = hive.key(ACCOUNT_USERS)?;
     let (keys, mut problems) = users.subkeys();
     // Names: each user name, its RID (its default value's type) and its key's time
-    let mut names: Vec<(String, Option<u32>, u64, bool)> = Vec::new();
-    let names_key = keys.iter().find(|k| k.name().eq_ignore_ascii_case("Names"));
-    if let Some(key) = names_key {
-        let (entries, why) = key.subkeys();
-        problems.extend(why.into_iter().map(|w| format!("Names: {w}")));
-        for entry in entries {
-            let (values, why) = entry.values();
-            problems.extend(
-                why.into_iter()
-                    .map(|w| format!(r"Names\{}: {w}", entry.name())),
-            );
-            let default = values.iter().find(|v| v.name().is_empty());
-            let replayed = entry.status() == Status::Replayed
-                || default.is_some_and(|v| v.status() == Status::Replayed);
-            names.push((
-                entry.name(),
-                default.map(Value::data_type),
-                entry.last_written(),
-                replayed,
-            ));
-        }
+    let names_keys: Vec<&Key> = keys
+        .iter()
+        .filter(|k| k.name().eq_ignore_ascii_case("Names"))
+        .collect();
+    if names_keys.len() > 1 {
+        problems.push("the Names key is present more than once".to_owned());
     }
+    let names_key = names_keys.first().copied();
+    if names_key.is_none() {
+        problems.push("the Names key is not there".to_owned());
+    }
+    let names = names_key.map_or_else(Vec::new, |key| account_names(key, &mut problems));
     let mut by_rid: HashMap<u32, usize> = HashMap::new();
     for (i, (_, rid, _, _)) in names.iter().enumerate() {
-        if let Some(rid) = rid {
-            by_rid.entry(*rid).or_insert(i);
+        if let Some(rid) = rid
+            && let Some(previous) = by_rid.insert(*rid, i)
+        {
+            problems.push(format!(
+                "Names entries {:?} and {:?} have the same RID {rid}",
+                names[previous].0, names[i].0
+            ));
+            by_rid.insert(*rid, previous);
         }
     }
     let mut taken = vec![false; names.len()];
@@ -306,6 +357,7 @@ fn account(key: &Key) -> Account {
             continue;
         }
         if seen.contains(&vname) {
+            a.replayed |= value.status() == Status::Replayed;
             problems.push(format!(
                 "value {:?} is present more than once",
                 value.name()
@@ -316,6 +368,13 @@ fn account(key: &Key) -> Account {
         a.replayed |= value.status() == Status::Replayed;
         let (bytes, why) = value.read_data();
         problems.extend(why.map(|w| format!("{}: {w}", value.name())));
+        if value.value_type() != ValueType::Binary {
+            problems.push(format!(
+                "{}: is {}, not REG_BINARY",
+                value.name(),
+                value.value_type().name()
+            ));
+        }
         match vname.as_str() {
             "f" => match user_f(&bytes) {
                 Ok(f) => {
@@ -332,20 +391,45 @@ fn account(key: &Key) -> Account {
                 a.username.clone_from(&v.username);
                 a.v = v;
             }
-            "userpasswordhint" => a.password_hint = text(&bytes),
-            "internetusername" => a.internet_user_name = text(&bytes),
-            _ => a.hidden_from_logon_ui = u32_at(&bytes, 0).map(|n| n != 0),
+            "userpasswordhint" => {
+                let (text, why) = text(&bytes);
+                a.password_hint = text;
+                problems.extend(why.map(|w| format!("UserPasswordHint: {w}")));
+            }
+            "internetusername" => {
+                let (text, why) = text(&bytes);
+                a.internet_user_name = text;
+                problems.extend(why.map(|w| format!("InternetUserName: {w}")));
+            }
+            _ => {
+                if bytes.len() != 4 {
+                    problems.push(format!(
+                        "UserDontShowInLogonUI: is {} bytes, not 4",
+                        bytes.len()
+                    ));
+                }
+                a.hidden_from_logon_ui = u32_at(&bytes, 0).map(|n| n != 0);
+            }
+        }
+    }
+    for (name, display) in [("f", "F"), ("v", "V")] {
+        if !seen.iter().any(|seen| seen == name) {
+            problems.push(format!("{display} is not there"));
         }
     }
     a.problems = problems;
     a
 }
 
-/// UTF-16 text up to its NUL, when there is any.
-fn text(bytes: &[u8]) -> Option<String> {
+/// UTF-16 text up to its NUL, when there is any, and whether it decoded lossily.
+fn text(bytes: &[u8]) -> (Option<String>, Option<String>) {
     let units = utf16_units(bytes);
     let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
-    (end > 0).then(|| String::from_utf16_lossy(&units[..end]))
+    let lossy = !bytes.len().is_multiple_of(2) || String::from_utf16(&units[..end]).is_err();
+    (
+        (end > 0).then(|| String::from_utf16_lossy(&units[..end])),
+        lossy.then(|| "is not valid UTF-16: decoded lossily".to_owned()),
+    )
 }
 
 #[cfg(test)]

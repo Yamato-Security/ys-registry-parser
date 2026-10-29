@@ -786,10 +786,12 @@ fn sam_accounts_that_dont_add_up() {
         b.value("UserDontShowInLogonUI", 3, &1u32.to_le_bytes(), false),
     ];
     let alice = b.key("000003E9", 0, &[], &alice_values, false);
-    // bob: F says another RID, Names another name; carol: V cut short
+    // bob: F has the wrong type and says another RID, Names another name; carol: V cut short
     let bob_values = [
-        b.value("F", 3, &sam_f(0, 2000, 0x10), false),
+        b.value("F", 1, &sam_f(0, 2000, 0x10), false),
         b.value("V", 3, &sam_v("bob"), false),
+        b.value("UserPasswordHint", 3, b"a", false),
+        b.value("UserDontShowInLogonUI", 3, &[1, 0], false),
     ];
     let bob = b.key("000003EA", 0, &[], &bob_values, false);
     let mut short = sam_v("carol");
@@ -799,7 +801,9 @@ fn sam_accounts_that_dont_add_up() {
         b.value("V", 3, &short, false),
     ];
     let carol = b.key("000003EB", 0, &[], &carol_values, false);
-    // Names: alice's, "robert" for bob's RID, carol's, and dave's without a Users key
+    // eve: an account key whose F and V are missing
+    let eve = b.key("000003ED", 0, &[], &[], false);
+    // Names: alice's, "robert" for bob's RID, carol's, eve's, and dave's without a Users key
     let name = |b: &mut Builder, name: &str, rid: u32| {
         let default = [b.value("", rid, &[], false)];
         b.key(name, 0, &[], &default, false)
@@ -808,10 +812,11 @@ fn sam_accounts_that_dont_add_up() {
         name(&mut b, "alice", 1001),
         name(&mut b, "carol", 1003),
         name(&mut b, "dave", 1004),
+        name(&mut b, "eve", 1005),
         name(&mut b, "robert", 1002),
     ];
     let names = b.key("Names", 0, &names, &[], false);
-    let mut key = b.key("Users", 0, &[alice, bob, carol, names], &[], false);
+    let mut key = b.key("Users", 0, &[alice, bob, carol, eve, names], &[], false);
     for name in ["Account", "Domains", "SAM"] {
         key = b.key(name, 0, &[key], &[], false);
     }
@@ -837,21 +842,53 @@ fn sam_accounts_that_dont_add_up() {
     assert_eq!(
         bob.problems,
         [
+            "F: is REG_SZ, not REG_BINARY",
             "F's RID is 2000, not its key's",
+            "UserPasswordHint: is not valid UTF-16: decoded lossily",
+            "UserDontShowInLogonUI: is 2 bytes, not 4",
             "its Names entry is robert, not its user name"
         ]
     );
+    assert_eq!(bob.hidden_from_logon_ui, None);
     let carol = &found[2];
     assert_eq!(carol.username, Some("carol".into()));
     assert_eq!(
         carol.problems,
         ["V: its user name of 10 bytes at 0 is past its end"]
     );
+    let eve = &found[3];
+    assert_eq!(
+        (eve.rid, eve.username.as_deref(), eve.f),
+        (Some(1005), Some("eve"), None)
+    );
+    assert_eq!(eve.problems, ["F is not there", "V is not there"]);
     // a Names entry without its Users key
-    let dave = &found[3];
+    let dave = &found[4];
     assert_eq!(
         (dave.rid, dave.username.as_deref(), dave.key_name.as_deref()),
         (Some(1004), Some("dave"), None)
     );
     assert_eq!(dave.problems, ["its Users key is not there"]);
+}
+
+#[test]
+fn a_sam_without_its_names_key_keeps_the_accounts() {
+    let mut b = Builder::new();
+    let values = [
+        b.value("F", 3, &sam_f(0, 1001, 0x10), false),
+        b.value("V", 3, &sam_v("alice"), false),
+    ];
+    let alice = b.key("000003E9", 0, &[], &values, false);
+    let mut key = b.key("Users", 0, &[alice], &[], false);
+    for name in ["Account", "Domains", "SAM"] {
+        key = b.key(name, 0, &[key], &[], false);
+    }
+    let root = b.root(&[key]);
+    let hive = Hive::from_bytes(b.hive(root)).unwrap();
+
+    let (found, problems) = accounts(&hive).unwrap();
+    assert_eq!(problems, ["the Names key is not there"]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].username.as_deref(), Some("alice"));
+    assert_eq!(found[0].problems, Vec::<String>::new());
 }
