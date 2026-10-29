@@ -30,7 +30,8 @@ const LISTS: [&str; 4] = ["Boot", "Logon", "Plain", "Maintenance"];
 /// A task's `Actions` value, decoded.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskActions {
-    /// Its version: 1 (Windows 8 and Server 2012), 3 (Windows 10 and later).
+    /// Its version: 1, 2 or 3. Version 2 is used by Windows Server 2016-era systems;
+    /// version 3 is used by current Windows 10 and later systems.
     pub version: u16,
     /// The context the actions run in (from version 2): a principal's id.
     pub context: Option<String>,
@@ -240,7 +241,9 @@ pub fn task_actions(bytes: &[u8]) -> (TaskActions, Option<String>) {
     .err();
     let problem = problem.map(|why| format!("Actions: {why}"));
     let problem = match (problem, decoded.version) {
-        (None, v) if v != 1 && v != 3 => Some(format!("Actions: version {v} is not one seen")),
+        (None, v) if ![1, 2, 3].contains(&v) => {
+            Some(format!("Actions: version {v} is not one seen"))
+        }
         (problem, _) => problem,
     };
     (decoded, problem)
@@ -402,6 +405,16 @@ fn tree_task(
     lists: &HashMap<String, Vec<String>>,
 ) -> Option<ScheduledTask> {
     let (values, mut problems) = key.values();
+    for name in ["Id", "Index", "SD"] {
+        if values
+            .iter()
+            .filter(|value| value.name().eq_ignore_ascii_case(name))
+            .count()
+            > 1
+        {
+            problems.push(format!("value {name:?} is present more than once"));
+        }
+    }
     let find = |name: &str| values.iter().find(|v| v.name().eq_ignore_ascii_case(name));
     let id = find("Id")?;
     let mut task = ScheduledTask {
@@ -449,15 +462,33 @@ fn read_task(key: &Key, task: &mut ScheduledTask) {
     task.replayed |= key.status() == Status::Replayed;
     task.problems
         .extend(problems.into_iter().map(|w| format!("Tasks: {w}")));
+    let mut seen = HashSet::new();
     for value in &values {
         task.replayed |= value.status() == Status::Replayed;
         let name = value.name();
+        let canonical = name.to_ascii_lowercase();
+        let known = matches!(
+            canonical.as_str(),
+            "path"
+                | "uri"
+                | "author"
+                | "description"
+                | "source"
+                | "date"
+                | "actions"
+                | "dynamicinfo"
+        );
+        if known && !seen.insert(canonical.clone()) {
+            task.problems
+                .push(format!("value {name:?} is present more than once"));
+            continue;
+        }
         let text = |slot: &mut Option<String>, problems: &mut Vec<String>| {
             let (text, why) = string(value);
             *slot = text;
             problems.extend(why.map(|w| format!("{name}: {w}")));
         };
-        match name.to_ascii_lowercase().as_str() {
+        match canonical.as_str() {
             "path" => text(&mut task.path, &mut task.problems),
             "uri" => text(&mut task.uri, &mut task.problems),
             "author" => text(&mut task.author, &mut task.problems),
@@ -467,7 +498,15 @@ fn read_task(key: &Key, task: &mut ScheduledTask) {
             "actions" => actions(value, task),
             "dynamicinfo" => {
                 let (bytes, why) = value.read_data();
-                match why.map_or_else(|| dynamic_info(&bytes), Err) {
+                task.problems
+                    .extend(why.map(|w| format!("DynamicInfo: {w}")));
+                if value.value_type() != ValueType::Binary {
+                    task.problems.push(format!(
+                        "DynamicInfo: is {}, not REG_BINARY",
+                        value.value_type().name()
+                    ));
+                }
+                match dynamic_info(&bytes) {
                     Ok(info) => task.dynamic_info = Some(info),
                     Err(why) => task.problems.push(format!("DynamicInfo: {why}")),
                 }
@@ -480,14 +519,14 @@ fn read_task(key: &Key, task: &mut ScheduledTask) {
 /// The task's `Actions`, with their bytes kept when they don't all decode.
 fn actions(value: &Value, task: &mut ScheduledTask) {
     let (bytes, why) = value.read_data();
-    let why = why.or_else(|| {
-        (value.value_type() != ValueType::Binary)
-            .then(|| format!("is {}, not REG_BINARY", value.value_type().name()))
-    });
     let (decoded, problem) = task_actions(&bytes);
     let problems: Vec<String> = why
         .map(|w| format!("Actions: {w}"))
         .into_iter()
+        .chain(
+            (value.value_type() != ValueType::Binary)
+                .then(|| format!("Actions: is {}, not REG_BINARY", value.value_type().name())),
+        )
         .chain(problem)
         .collect();
     if !problems.is_empty() {
@@ -593,6 +632,22 @@ mod tests {
         assert_eq!((fields[0].as_str(), fields[7].as_str()), ("a@x", "Body"));
         assert_eq!(attachments, &[r"C:\f.txt".to_owned()]);
         assert_eq!(headers, &[("X-Name".to_owned(), "value".to_owned())]);
+    }
+
+    #[test]
+    fn version_2_actions_are_supported() {
+        let mut b = 2u16.to_le_bytes().to_vec();
+        b.extend(s("LocalSystem"));
+        b.extend([0x66, 0x66]);
+        b.extend(s(""));
+        b.extend(s(r"C:\Windows\Temp\helper.exe"));
+        b.extend(s("--run"));
+        b.extend(s(r"C:\Windows\Temp"));
+        let (actions, problem) = task_actions(&b);
+        assert_eq!(problem, None);
+        assert_eq!(actions.version, 2);
+        assert_eq!(actions.context.as_deref(), Some("LocalSystem"));
+        assert_eq!(actions.actions.len(), 1);
     }
 
     #[test]

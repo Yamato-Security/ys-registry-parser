@@ -564,35 +564,48 @@ fn a_task_cache() {
     let orphan_guid = "{11111111-2222-3333-4444-555555555555}";
     let mut b = Builder::new();
     // Tree: a task, a task without its SD (hidden), an Index 0 task without a Tasks key
-    let tree_task = |b: &mut Builder, name: &str, guid: &str, index: u32, sd: bool| {
-        let mut values = vec![
-            b.value("Id", 1, &utf16z(guid), false),
-            b.value("Index", 4, &index.to_le_bytes(), false),
-        ];
-        if sd {
-            values.push(b.value("SD", 3, &[1, 0, 4, 0x80, 0, 0, 0, 0], false));
-        }
-        b.key(name, 0, &[], &values, false)
-    };
-    let sync = tree_task(&mut b, "SynchronizeTime", sync_guid, 3, true);
+    let tree_task =
+        |b: &mut Builder, name: &str, guid: &str, index: u32, sd: bool, duplicate_id: bool| {
+            let mut values = vec![
+                b.value("Id", 1, &utf16z(guid), false),
+                b.value("Index", 4, &index.to_le_bytes(), false),
+            ];
+            if duplicate_id {
+                values.push(b.value("ID", 1, &utf16z(orphan_guid), false));
+            }
+            if sd {
+                values.push(b.value("SD", 3, &[1, 0, 4, 0x80, 0, 0, 0, 0], false));
+            }
+            b.key(name, 0, &[], &values, false)
+        };
+    let sync = tree_task(&mut b, "SynchronizeTime", sync_guid, 3, true, false);
     let time = b.key("Time Synchronization", 0, &[sync], &[], false);
-    let wdi = tree_task(&mut b, "ResolutionHost", wdi_guid, 2, false);
+    let wdi = tree_task(&mut b, "ResolutionHost", wdi_guid, 2, false, false);
     let wdi = b.key("WDI", 0, &[wdi], &[], false);
-    let gone = tree_task(&mut b, "ScheduledDefrag", gone_guid, 0, true);
+    let gone = tree_task(&mut b, "ScheduledDefrag", gone_guid, 0, true, true);
     let defrag = b.key("Defrag", 0, &[gone], &[], false);
     let windows = b.key("Windows", 0, &[defrag, time, wdi], &[], false);
     let microsoft = b.key("Microsoft", 0, &[windows], &[], false);
     let tree = b.key("Tree", 0, &[microsoft], &[], false);
     // Tasks: the two tasks' keys, the second's Path not its Tree name, and a key no Tree entry
     // names, its Actions cut short
-    let task = |b: &mut Builder, guid: &str, path: &str, actions: &[u8], dynamic: Option<&[u8]>| {
+    let task = |b: &mut Builder,
+                guid: &str,
+                path: &str,
+                actions: &[u8],
+                actions_type: u32,
+                dynamic: Option<(u32, &[u8])>,
+                duplicate_actions: Option<&[u8]>| {
         let mut values = vec![
             b.value("Path", 1, &utf16z(path), false),
             b.value("URI", 1, &utf16z(path), false),
-            b.value("Actions", 3, actions, false),
+            b.value("Actions", actions_type, actions, false),
         ];
-        if let Some(d) = dynamic {
-            values.push(b.value("DynamicInfo", 3, d, false));
+        if let Some((value_type, d)) = dynamic {
+            values.push(b.value("DynamicInfo", value_type, d, false));
+        }
+        if let Some(duplicate) = duplicate_actions {
+            values.push(b.value("ACTIONS", 3, duplicate, false));
         }
         b.key(guid, 0, &[], &values, false)
     };
@@ -601,17 +614,29 @@ fn a_task_cache() {
         sync_guid,
         r"\Microsoft\Windows\Time Synchronization\SynchronizeTime",
         &unhex(SYNC_ACTIONS),
-        Some(&unhex(SYNC_DYNAMIC)),
+        3,
+        Some((3, &unhex(SYNC_DYNAMIC))),
+        None,
     );
     let wdi_task = task(
         &mut b,
         wdi_guid,
         r"\Microsoft\Windows\WDI\Renamed",
         &unhex(WDI_ACTIONS),
-        Some(&[0; 20]),
+        3,
+        Some((1, &[0; 20])),
+        None,
     );
     let cut = &unhex(SYNC_ACTIONS)[..60];
-    let orphan = task(&mut b, orphan_guid, r"\Hidden\Orphan", cut, None);
+    let orphan = task(
+        &mut b,
+        orphan_guid,
+        r"\Hidden\Orphan",
+        cut,
+        1,
+        None,
+        Some(&unhex(SYNC_ACTIONS)),
+    );
     let tasks = b.key("Tasks", 0, &[sync_task, wdi_task, orphan], &[], false);
     let in_list = |b: &mut Builder, list: &str, guids: &[&str]| {
         let keys: Vec<u32> = guids.iter().map(|g| b.key(g, 0, &[], &[], false)).collect();
@@ -651,7 +676,8 @@ fn a_task_cache() {
         (gone.index, gone.in_tree, gone.in_tasks),
         (Some(0), true, false)
     );
-    assert!(gone.actions.is_none() && gone.problems.is_empty());
+    assert!(gone.actions.is_none());
+    assert_eq!(gone.problems, [r#"value "Id" is present more than once"#]);
 
     let sync = &found[1];
     assert_eq!(sync.guid.as_deref(), Some(sync_guid));
@@ -698,6 +724,7 @@ fn a_task_cache() {
     assert_eq!(
         wdi.problems,
         [
+            "DynamicInfo: is REG_SZ, not REG_BINARY",
             "DynamicInfo: DynamicInfo of 20 bytes, not 28 or 36",
             r"its Tasks key's Path is \Microsoft\Windows\WDI\Renamed, not its Tree name",
         ]
@@ -709,7 +736,11 @@ fn a_task_cache() {
     assert_eq!(orphan.guid.as_deref(), Some(orphan_guid));
     assert_eq!(
         orphan.problems,
-        ["Actions: a string of 48 bytes at 36 is cut short (20 bytes left)"]
+        [
+            "Actions: is REG_SZ, not REG_BINARY",
+            "Actions: a string of 48 bytes at 36 is cut short (20 bytes left)",
+            r#"value "ACTIONS" is present more than once"#,
+        ]
     );
     assert_eq!(orphan.actions_raw.as_deref(), Some(cut));
 }

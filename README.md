@@ -56,8 +56,9 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
   lists it is in (`Boot`, `Logon`, `Plain`, `Maintenance`), and tasks with only one of the two.
-  `task_actions` decodes `Actions` by its structure, version 1 (Windows 8, Server 2012) and 3
-  (Windows 10 and later): the context, then each exec (program, arguments, working directory),
+  `task_actions` decodes `Actions` by its structure, versions 1, 2 and 3 (including Windows
+  Server 2016-era and current Windows 10+ layouts): the context, then each exec (program,
+  arguments, working directory),
   COM handler (class id, data), e-mail and message box action, as far as the bytes go;
   `dynamic_info` decodes `DynamicInfo` (last registered, last run, state, last result, last
   successful run).

@@ -101,7 +101,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// `Actions` and `DynamicInfo` of any bytes, and of bytes that start as version 1 or 3 do:
+    /// `Actions` and `DynamicInfo` of any bytes, and of bytes that start as version 1, 2 or 3 do:
     /// decoded as far as they go.
     #[test]
     fn task_values(
