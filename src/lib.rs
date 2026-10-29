@@ -30,6 +30,7 @@ mod deleted;
 mod hive;
 mod log;
 pub mod ntuser;
+pub mod software;
 pub mod system;
 
 use std::path::Path;

@@ -110,7 +110,7 @@ pub fn computer_name(hive: &Hive) -> Option<String> {
 
 /// A string value's text, and what is wrong with it: not a string (no text), or not valid
 /// UTF-16 (the text decoded lossily). A value without data has neither.
-fn string(value: &Value) -> (Option<String>, Option<String>) {
+pub(crate) fn string(value: &Value) -> (Option<String>, Option<String>) {
     let bytes = match value.data() {
         Ok(bytes) => bytes,
         Err(why) => return (None, Some(why)),
@@ -134,7 +134,7 @@ fn string(value: &Value) -> (Option<String>, Option<String>) {
 }
 
 /// A number value's number, or what is wrong with it.
-fn number(value: &Value) -> Result<u32, String> {
+pub(crate) fn number(value: &Value) -> Result<u32, String> {
     if value.value_type() != ValueType::Dword {
         return Err(format!("is {}, not REG_DWORD", value.value_type().name()));
     }

@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::cast_possible_wrap)]
 
 use ys_registry_parser::ntuser::recent_docs;
+use ys_registry_parser::software::{TaskAction, task_cache};
 use ys_registry_parser::{Data, Hive, Status, decode};
 
 /// 2022-02-08T21:03:52Z.
@@ -536,4 +537,179 @@ fn recent_docs_that_dont_add_up() {
         ["it has no MRUListEx: its items' order is unknown"]
     );
     assert_eq!(txt.items[0].mru_position, None);
+}
+
+/// Bytes from hex.
+fn unhex(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// `Actions` and `DynamicInfo` of two tasks of the DFIR Artifact Museum's Windows 11 `SOFTWARE`
+/// hive (MIT): `Time Synchronization\SynchronizeTime` (exec) and `WDI\ResolutionHost` (COM).
+const SYNC_ACTIONS: &str = "0300180000004c006f00630061006c005300650072007600690063006500666600000000300000002500770069006e0064006900720025005c00730079007300740065006d00330032005c00730063002e0065007800650034000000730074006100720074002000770033003200740069006d00650020007400610073006b005f007300740061007200740065006400000000000000";
+const SYNC_DYNAMIC: &str =
+    "0300000042bed253da1ad801d6e9726c8d20d8010000000020040000573f4d6f8d20d801";
+const WDI_ACTIONS: &str =
+    "03000a000000550073006500720073007777000000009de30b90e86b1a46bc4db0fa71f5ecb100000000";
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_task_cache() {
+    let sync_guid = "{CC75EC31-F3E4-4F10-8279-0ECC1C1C37CD}";
+    let wdi_guid = "{65BDF6F5-C21D-48A0-B348-55233C383652}";
+    let gone_guid = "{8C1BA5F6-61DE-43AE-A3F2-37AA03E817CD}";
+    let orphan_guid = "{11111111-2222-3333-4444-555555555555}";
+    let mut b = Builder::new();
+    // Tree: a task, a task without its SD (hidden), an Index 0 task without a Tasks key
+    let tree_task = |b: &mut Builder, name: &str, guid: &str, index: u32, sd: bool| {
+        let mut values = vec![
+            b.value("Id", 1, &utf16z(guid), false),
+            b.value("Index", 4, &index.to_le_bytes(), false),
+        ];
+        if sd {
+            values.push(b.value("SD", 3, &[1, 0, 4, 0x80, 0, 0, 0, 0], false));
+        }
+        b.key(name, 0, &[], &values, false)
+    };
+    let sync = tree_task(&mut b, "SynchronizeTime", sync_guid, 3, true);
+    let time = b.key("Time Synchronization", 0, &[sync], &[], false);
+    let wdi = tree_task(&mut b, "ResolutionHost", wdi_guid, 2, false);
+    let wdi = b.key("WDI", 0, &[wdi], &[], false);
+    let gone = tree_task(&mut b, "ScheduledDefrag", gone_guid, 0, true);
+    let defrag = b.key("Defrag", 0, &[gone], &[], false);
+    let windows = b.key("Windows", 0, &[defrag, time, wdi], &[], false);
+    let microsoft = b.key("Microsoft", 0, &[windows], &[], false);
+    let tree = b.key("Tree", 0, &[microsoft], &[], false);
+    // Tasks: the two tasks' keys, the second's Path not its Tree name, and a key no Tree entry
+    // names, its Actions cut short
+    let task = |b: &mut Builder, guid: &str, path: &str, actions: &[u8], dynamic: Option<&[u8]>| {
+        let mut values = vec![
+            b.value("Path", 1, &utf16z(path), false),
+            b.value("URI", 1, &utf16z(path), false),
+            b.value("Actions", 3, actions, false),
+        ];
+        if let Some(d) = dynamic {
+            values.push(b.value("DynamicInfo", 3, d, false));
+        }
+        b.key(guid, 0, &[], &values, false)
+    };
+    let sync_task = task(
+        &mut b,
+        sync_guid,
+        r"\Microsoft\Windows\Time Synchronization\SynchronizeTime",
+        &unhex(SYNC_ACTIONS),
+        Some(&unhex(SYNC_DYNAMIC)),
+    );
+    let wdi_task = task(
+        &mut b,
+        wdi_guid,
+        r"\Microsoft\Windows\WDI\Renamed",
+        &unhex(WDI_ACTIONS),
+        Some(&[0; 20]),
+    );
+    let cut = &unhex(SYNC_ACTIONS)[..60];
+    let orphan = task(&mut b, orphan_guid, r"\Hidden\Orphan", cut, None);
+    let tasks = b.key("Tasks", 0, &[sync_task, wdi_task, orphan], &[], false);
+    let in_list = |b: &mut Builder, list: &str, guids: &[&str]| {
+        let keys: Vec<u32> = guids.iter().map(|g| b.key(g, 0, &[], &[], false)).collect();
+        b.key(list, 0, &keys, &[], false)
+    };
+    let plain = in_list(&mut b, "Plain", &[sync_guid]);
+    let logon = in_list(&mut b, "Logon", &[wdi_guid]);
+    let maintenance = in_list(&mut b, "Maintenance", &[sync_guid]);
+    let mut key = b.key(
+        "TaskCache",
+        0,
+        &[tree, tasks, plain, logon, maintenance],
+        &[],
+        false,
+    );
+    for name in ["Schedule", "CurrentVersion", "Windows NT", "Microsoft"] {
+        key = b.key(name, 0, &[key], &[], false);
+    }
+    let root = b.root(&[key]);
+    let hive = Hive::from_bytes(b.hive(root)).unwrap();
+
+    let (found, problems) = task_cache(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let names: Vec<&str> = found.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            r"\Microsoft\Windows\Defrag\ScheduledDefrag",
+            r"\Microsoft\Windows\Time Synchronization\SynchronizeTime",
+            r"\Microsoft\Windows\WDI\ResolutionHost",
+            r"\Hidden\Orphan",
+        ]
+    );
+    // an Index 0 entry without a Tasks key
+    let gone = &found[0];
+    assert_eq!(
+        (gone.index, gone.in_tree, gone.in_tasks),
+        (Some(0), true, false)
+    );
+    assert!(gone.actions.is_none() && gone.problems.is_empty());
+
+    let sync = &found[1];
+    assert_eq!(sync.guid.as_deref(), Some(sync_guid));
+    assert_eq!(sync.index, Some(3));
+    assert_eq!(sync.lists, ["Plain", "Maintenance"]);
+    assert_eq!(sync.has_security_descriptor, Some(true));
+    assert_eq!(
+        (sync.tree_last_written, sync.task_last_written),
+        (Some(WHEN), Some(WHEN))
+    );
+    let actions = sync.actions.as_ref().unwrap();
+    assert_eq!(
+        (actions.version, actions.context.as_deref()),
+        (3, Some("LocalService"))
+    );
+    assert_eq!(
+        actions.actions,
+        [TaskAction::Exec {
+            id: String::new(),
+            command: r"%windir%\system32\sc.exe".into(),
+            arguments: "start w32time task_started".into(),
+            working_directory: String::new(),
+        }]
+    );
+    let dynamic = sync.dynamic_info.unwrap();
+    assert_eq!(dynamic.last_registered, 132_885_714_018_942_530);
+    assert_eq!(dynamic.last_run, 132_891_980_789_377_494);
+    assert_eq!(dynamic.last_result, 0x420);
+    assert_eq!(dynamic.last_successful_run, Some(132_891_980_837_240_663));
+    assert_eq!(sync.problems, Vec::<String>::new());
+
+    // no SD: the Task Scheduler doesn't show it; its Path is not its Tree name
+    let wdi = &found[2];
+    assert_eq!(wdi.has_security_descriptor, Some(false));
+    assert_eq!(wdi.lists, ["Logon"]);
+    assert_eq!(
+        wdi.actions.as_ref().unwrap().actions,
+        [TaskAction::ComHandler {
+            id: String::new(),
+            class_id: "{900BE39D-6BE8-461A-BC4D-B0FA71F5ECB1}".into(),
+            data: String::new(),
+        }]
+    );
+    assert_eq!(
+        wdi.problems,
+        [
+            "DynamicInfo: DynamicInfo of 20 bytes, not 28 or 36",
+            r"its Tasks key's Path is \Microsoft\Windows\WDI\Renamed, not its Tree name",
+        ]
+    );
+    // a Tasks key no Tree entry names: named by its Path; its cut Actions kept
+    let orphan = &found[3];
+    assert_eq!((orphan.in_tree, orphan.in_tasks), (false, true));
+    assert_eq!(orphan.has_security_descriptor, None);
+    assert_eq!(orphan.guid.as_deref(), Some(orphan_guid));
+    assert_eq!(
+        orphan.problems,
+        ["Actions: a string of 48 bytes at 36 is cut short (20 bytes left)"]
+    );
+    assert_eq!(orphan.actions_raw.as_deref(), Some(cut));
 }

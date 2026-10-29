@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use proptest::prelude::*;
 use ys_registry_parser::ntuser::{profile_name, recent_docs};
+use ys_registry_parser::software::{dynamic_info, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, computer_name, services};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -59,7 +60,7 @@ fn read_all(data: Vec<u8>) {
     for set in sets.present {
         let _ = services(&hive, set);
     }
-    let _ = (recent_docs(&hive), profile_name(&hive));
+    let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
 }
 
 proptest! {
@@ -94,5 +95,28 @@ proptest! {
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
     ) {
         read_all(damage(ntuser().to_vec(), flips));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// `Actions` and `DynamicInfo` of any bytes, and of bytes that start as version 1 or 3 do:
+    /// decoded as far as they go.
+    #[test]
+    fn task_values(
+        version in 0u16..5,
+        context in proptest::collection::vec(any::<u8>(), 0..64),
+        rest in proptest::collection::vec(any::<u8>(), 0..400)
+    ) {
+        let mut bytes = version.to_le_bytes().to_vec();
+        if version >= 2 {
+            bytes.extend((context.len() as u32).to_le_bytes());
+            bytes.extend(&context);
+        }
+        bytes.extend(&rest);
+        let _ = task_actions(&bytes);
+        let _ = task_actions(&rest);
+        let _ = dynamic_info(&rest);
     }
 }
