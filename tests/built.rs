@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::cast_possible_wrap)]
 
 use ys_registry_parser::ntuser::recent_docs;
+use ys_registry_parser::sam::accounts;
 use ys_registry_parser::software::{TaskAction, task_cache};
 use ys_registry_parser::{Data, Hive, Status, decode};
 
@@ -743,4 +744,114 @@ fn a_task_cache() {
         ]
     );
     assert_eq!(orphan.actions_raw.as_deref(), Some(cut));
+}
+
+/// A SAM account's `F`: its last logon, RID and flags.
+fn sam_f(last_logon: u64, rid: u32, flags: u16) -> Vec<u8> {
+    let mut f = vec![0u8; 80];
+    f[0x08..0x10].copy_from_slice(&last_logon.to_le_bytes());
+    f[0x30..0x34].copy_from_slice(&rid.to_le_bytes());
+    f[0x38..0x3A].copy_from_slice(&flags.to_le_bytes());
+    f
+}
+
+/// A SAM account's `V` with its user name.
+fn sam_v(name: &str) -> Vec<u8> {
+    let name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut v = vec![0u8; 0xCC];
+    v[12..16].copy_from_slice(&0u32.to_le_bytes());
+    v[16..20].copy_from_slice(&(name.len() as u32).to_le_bytes());
+    v.extend(name);
+    v
+}
+
+#[test]
+fn sam_accounts_that_dont_add_up() {
+    let mut b = Builder::new();
+    let hint: Vec<u8> = "the usual"
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let mail: Vec<u8> = "alice@example.com"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    // alice: a hint, a Microsoft account, hidden from the sign-in screen
+    let alice_values = [
+        b.value("F", 3, &sam_f(WHEN, 1001, 0x10), false),
+        b.value("V", 3, &sam_v("alice"), false),
+        b.value("UserPasswordHint", 3, &hint, false),
+        b.value("InternetUserName", 3, &mail, false),
+        b.value("UserDontShowInLogonUI", 3, &1u32.to_le_bytes(), false),
+    ];
+    let alice = b.key("000003E9", 0, &[], &alice_values, false);
+    // bob: F says another RID, Names another name; carol: V cut short
+    let bob_values = [
+        b.value("F", 3, &sam_f(0, 2000, 0x10), false),
+        b.value("V", 3, &sam_v("bob"), false),
+    ];
+    let bob = b.key("000003EA", 0, &[], &bob_values, false);
+    let mut short = sam_v("carol");
+    short.truncate(0xCC + 4);
+    let carol_values = [
+        b.value("F", 3, &sam_f(0, 1003, 0x11), false),
+        b.value("V", 3, &short, false),
+    ];
+    let carol = b.key("000003EB", 0, &[], &carol_values, false);
+    // Names: alice's, "robert" for bob's RID, carol's, and dave's without a Users key
+    let name = |b: &mut Builder, name: &str, rid: u32| {
+        let default = [b.value("", rid, &[], false)];
+        b.key(name, 0, &[], &default, false)
+    };
+    let names = [
+        name(&mut b, "alice", 1001),
+        name(&mut b, "carol", 1003),
+        name(&mut b, "dave", 1004),
+        name(&mut b, "robert", 1002),
+    ];
+    let names = b.key("Names", 0, &names, &[], false);
+    let mut key = b.key("Users", 0, &[alice, bob, carol, names], &[], false);
+    for name in ["Account", "Domains", "SAM"] {
+        key = b.key(name, 0, &[key], &[], false);
+    }
+    let root = b.root(&[key]);
+    let hive = Hive::from_bytes(b.hive(root)).unwrap();
+
+    let (found, problems) = accounts(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let alice = &found[0];
+    assert_eq!(
+        (alice.rid, alice.username.as_deref()),
+        (Some(1001), Some("alice"))
+    );
+    assert_eq!(alice.password_hint.as_deref(), Some("the usual"));
+    assert_eq!(
+        alice.internet_user_name.as_deref(),
+        Some("alice@example.com")
+    );
+    assert_eq!(alice.hidden_from_logon_ui, Some(true));
+    assert_eq!(alice.f.unwrap().last_logon, WHEN);
+    assert_eq!(alice.problems, Vec::<String>::new());
+    let bob = &found[1];
+    assert_eq!(
+        bob.problems,
+        [
+            "F's RID is 2000, not its key's",
+            "its Names entry is robert, not its user name"
+        ]
+    );
+    let carol = &found[2];
+    assert_eq!(carol.username, Some("carol".into()));
+    assert_eq!(
+        carol.problems,
+        ["V: its user name of 10 bytes at 0 is past its end"]
+    );
+    // a Names entry without its Users key
+    let dave = &found[3];
+    assert_eq!(
+        (dave.rid, dave.username.as_deref(), dave.key_name.as_deref()),
+        (Some(1004), Some("dave"), None)
+    );
+    assert_eq!(dave.problems, ["its Users key is not there"]);
 }

@@ -62,6 +62,14 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   COM handler (class id, data), e-mail and message box action, as far as the bytes go;
   `dynamic_info` decodes `DynamicInfo` (last registered, last run, state, last result, last
   successful run).
+- `SAM` hives (`sam`): the local accounts (`accounts`), each from its key under
+  `SAM\Domains\Account\Users`: `F` (`user_f`: last logon, password last set, account expiry,
+  last failed logon, RID, account control flags, country code, code page, failed and total logon
+  counts), `V`'s strings (`user_v`: user name, full name, comments, home directory and drive,
+  logon script, profile path), the password hint, the Microsoft account it is linked to, and
+  whether the sign-in screen hides it; its `Names` entry's RID and time (about when the account
+  was made) are matched with it, and what disagrees is reported. `account_flag_names` names the
+  flags. Password hashes are not read.
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
@@ -124,6 +132,10 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
   tasks, lists, actions and times as a separate decoder built on yarp, every `Actions` value
   decoded to its last byte.
+- Local accounts on 7 public `SAM` hives (regipy's and the DFIR Artifact Museum's, Windows 7 to
+  11, Server 2012 R2 and 2022; 30 accounts): every `F` and `V` field the same as
+  [dissect](https://github.com/fox-it/dissect.target)'s `user_F` and `user_V` structures give,
+  and the account expiry and logon counts as regipy's `samparse`.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
@@ -132,7 +144,9 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile); recent
   documents whose list and values don't add up; a task cache built with real Windows 11 `Actions`
   and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
-  way round, and `Actions` cut short; random damage, and random `Actions`.
+  way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`); accounts
+  whose `F`, `V` and `Names` disagree or are cut short, with a password hint, a Microsoft account
+  and `UserDontShowInLogonUI`; random damage, and random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: deleted records in the slack of cells in use, in the data past the hive bins, or in the
