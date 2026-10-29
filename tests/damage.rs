@@ -63,6 +63,10 @@ fn read_all(data: Vec<u8>) {
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = accounts(&hive);
+    // recovery reads the hive several times over: on the smaller hives
+    if hive.bytes().len() <= 4 << 20 {
+        let _ = hive.recover();
+    }
 }
 
 proptest! {

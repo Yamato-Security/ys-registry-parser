@@ -7,10 +7,10 @@ use std::collections::HashSet;
 
 use crate::bytes::{i32_at, name, u16_at, u32_at, u64_at};
 use crate::data::ValueType;
-use crate::log::{self, BASE, HBIN_ALIGNMENT, LogFile, Recovery};
+use crate::log::{self, BASE, HBIN_ALIGNMENT, LogEntry, LogFile, Recovery};
 
 /// Big data segments hold this much (the rest of their cell is padding).
-const SEGMENT: usize = 16_344;
+pub(crate) const SEGMENT: usize = 16_344;
 /// How deep subkey lists may nest (an `ri` list holds `li`, `lf` or `lh` lists).
 const MAX_LIST_DEPTH: usize = 4;
 /// A key node's fixed part, before its name.
@@ -118,6 +118,8 @@ pub struct Hive {
     original: Option<Vec<u8>>,
     header: Header,
     root: u32,
+    /// The entries of the logs it was opened with: their dirty pages, for recovery.
+    log_entries: Vec<LogEntry>,
 }
 
 impl Hive {
@@ -144,7 +146,9 @@ impl Hive {
         } else {
             (primary, None)
         };
-        Ok((Self::read(bytes, original)?, recovery))
+        let mut hive = Self::read(bytes, original)?;
+        hive.log_entries = log::entries(logs);
+        Ok((hive, recovery))
     }
 
     /// A hive read as it is, without its logs.
@@ -165,6 +169,7 @@ impl Hive {
             bytes,
             original,
             header,
+            log_entries: Vec::new(),
         };
         if hive.key_at(hive.root).is_none() {
             // the base block's root is not a key: the key flagged as the hive's root
@@ -228,6 +233,38 @@ impl Hive {
 
     pub(crate) fn minor_version(&self) -> u32 {
         self.header.minor_version
+    }
+
+    /// The root key's offset.
+    pub(crate) fn root_offset(&self) -> u32 {
+        self.root
+    }
+
+    /// The file as it was before its logs' replay, when they changed it.
+    pub(crate) fn original(&self) -> Option<&[u8]> {
+        self.original.as_deref()
+    }
+
+    /// The entries of the logs the hive was opened with.
+    pub(crate) fn log_entries(&self) -> &[LogEntry] {
+        &self.log_entries
+    }
+
+    /// `bytes` read as this hive (its base block and root as they are), without parsing them
+    /// again: a version of it, such as one with a log entry's pages written over it.
+    pub(crate) fn view(&self, bytes: Vec<u8>) -> Hive {
+        Hive {
+            bytes,
+            original: None,
+            header: self.header.clone(),
+            root: self.root,
+            log_entries: Vec::new(),
+        }
+    }
+
+    /// Its bytes, given back.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 
     /// The data of the cell at `offset` (after its size), in use or free, as far as the file
@@ -399,6 +436,11 @@ pub struct Key<'h> {
 }
 
 impl<'h> Key<'h> {
+    /// Its `nk` record.
+    pub(crate) fn record(&self) -> &'h [u8] {
+        self.nk
+    }
+
     /// Where its cell is in the hive bins.
     #[must_use]
     pub fn offset(&self) -> u32 {
@@ -609,7 +651,12 @@ pub struct Value<'h> {
     vk: &'h [u8],
 }
 
-impl Value<'_> {
+impl<'h> Value<'h> {
+    /// Its `vk` record.
+    pub(crate) fn record(&self) -> &'h [u8] {
+        self.vk
+    }
+
     /// Where its cell is in the hive bins.
     #[must_use]
     pub fn offset(&self) -> u32 {
