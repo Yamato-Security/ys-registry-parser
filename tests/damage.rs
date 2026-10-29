@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use proptest::prelude::*;
 use ys_registry_parser::ntuser::{profile_name, recent_docs};
+use ys_registry_parser::sam::{accounts, user_f, user_v};
 use ys_registry_parser::software::{dynamic_info, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, computer_name, services};
 
@@ -61,6 +62,7 @@ fn read_all(data: Vec<u8>) {
         let _ = services(&hive, set);
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
+    let _ = accounts(&hive);
 }
 
 proptest! {
@@ -118,5 +120,6 @@ proptest! {
         let _ = task_actions(&bytes);
         let _ = task_actions(&rest);
         let _ = dynamic_info(&rest);
+        let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
     }
 }

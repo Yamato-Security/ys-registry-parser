@@ -26,3 +26,7 @@ First version. (@YamatoSecurity)
   from its `Tree` entry and `Tasks` key, its lists, whether its security descriptor is there,
   `Actions` decoded by their structure (`task_actions`, `TaskActions`, `TaskAction`: exec, COM
   handler, e-mail, message box) and `DynamicInfo` (`dynamic_info`).
+- `sam`: a `SAM` hive's local accounts (`accounts`, `Account`): `F` (`user_f`, `UserF`), `V`'s
+  strings (`user_v`, `UserV`), the password hint, the linked Microsoft account, whether the
+  sign-in screen hides the account, and its `Names` entry, matched with it; `account_flag_names`.
+  Password hashes are not read.
