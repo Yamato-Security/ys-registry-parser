@@ -4,11 +4,11 @@
 //! A service's `FailureActions` is a `SERVICE_FAILURE_ACTIONS` as the Service Control Manager
 //! writes it: the reset period, two fields that say whether a reboot message and a command are
 //! set (the strings are the `RebootMessage` and `FailureCommand` values), the number of actions,
-//! a pointer field (stale: an address in the writer's memory), then the `SC_ACTION`s (type and
-//! delay in milliseconds), 8 bytes each.
+//! a serialized pointer field that is not needed to locate the stored actions, then the
+//! `SC_ACTION`s (type and delay in milliseconds), 8 bytes each.
 
 use crate::bytes::u32_at;
-use crate::data::{Data, decode};
+use crate::data::{Data, ValueType, decode};
 use crate::hive::{Hive, Key, Status, Value};
 
 /// The size of `FailureActions` before its actions.
@@ -38,6 +38,9 @@ impl ControlSets {
         let select = hive.key("Select");
         let number = |name: &str| {
             let value = select.as_ref()?.value(name)?;
+            if value.value_type() != ValueType::Dword {
+                return None;
+            }
             match decode(value.data_type(), &value.data().ok()?) {
                 Data::Number(n) => u32::try_from(n).ok(),
                 _ => None,
@@ -59,6 +62,14 @@ impl ControlSets {
             last_known_good: number("LastKnownGood"),
             present,
         }
+    }
+
+    /// The current control set when it is present, otherwise the first control set present.
+    #[must_use]
+    pub fn current_or_first(&self) -> Option<u32> {
+        self.current
+            .filter(|current| self.present.contains(current))
+            .or_else(|| self.present.first().copied())
     }
 }
 
@@ -84,7 +95,7 @@ fn control_set_number(name: &str) -> Option<u32> {
 #[must_use]
 pub fn computer_name(hive: &Hive) -> Option<String> {
     let sets = ControlSets::read(hive);
-    let set = control_set_name(sets.current.or(sets.present.first().copied()).unwrap_or(1));
+    let set = control_set_name(sets.current_or_first().unwrap_or(1));
     let text = |path: &str, name: &str| {
         string(&hive.key(path)?.value(name)?)
             .0
@@ -98,7 +109,7 @@ pub fn computer_name(hive: &Hive) -> Option<String> {
 }
 
 /// A string value's text, and what is wrong with it: not a string (no text), or not valid
-/// UTF-16 (the text with replacement characters). A value without data has neither.
+/// UTF-16 (the text decoded lossily). A value without data has neither.
 fn string(value: &Value) -> (Option<String>, Option<String>) {
     let bytes = match value.data() {
         Ok(bytes) => bytes,
@@ -106,12 +117,12 @@ fn string(value: &Value) -> (Option<String>, Option<String>) {
     };
     match decode(value.data_type(), &bytes) {
         Data::Text { value: text, lossy } => {
-            let why = lossy.then(|| "is not valid UTF-16: decoded with replacements".to_owned());
+            let why = lossy.then(|| "is not valid UTF-16: decoded lossily".to_owned());
             (Some(text), why)
         }
         // a string written as a multi-string: its one string (Windows shows it)
         Data::MultiText { values, lossy } if values.len() <= 1 => {
-            let why = lossy.then(|| "is not valid UTF-16: decoded with replacements".to_owned());
+            let why = lossy.then(|| "is not valid UTF-16: decoded lossily".to_owned());
             (values.into_iter().next(), why)
         }
         _ if bytes.is_empty() => (None, None),
@@ -124,6 +135,9 @@ fn string(value: &Value) -> (Option<String>, Option<String>) {
 
 /// A number value's number, or what is wrong with it.
 fn number(value: &Value) -> Result<u32, String> {
+    if value.value_type() != ValueType::Dword {
+        return Err(format!("is {}, not REG_DWORD", value.value_type().name()));
+    }
     match decode(value.data_type(), &value.data()?) {
         Data::Number(n) => u32::try_from(n).map_err(|_| format!("{n} is too large")),
         Data::Malformed(why) => Err(why),
@@ -297,6 +311,7 @@ fn service(key: &Key) -> Service {
     };
     for value in &values {
         let name = value.name();
+        replayed |= value.status() == Status::Replayed;
         let mut problem = |why: Option<String>| {
             if let Some(why) = why {
                 problems.push(format!("{name}: {why}"));
@@ -326,32 +341,59 @@ fn service(key: &Key) -> Service {
                         .err(),
                 );
             }
-            "failureactions" => match value.data() {
-                Ok(bytes) => match failure_actions(&bytes) {
-                    Ok(actions) => s.failure_actions = Some(actions),
-                    Err(why) => {
-                        problems.push(why);
-                        s.failure_actions_raw = Some(bytes);
+            "failureactions" => {
+                let (bytes, read_problem) = value.read_data();
+                let why = read_problem.or_else(|| {
+                    (value.value_type() != ValueType::Binary)
+                        .then(|| format!("is {}, not REG_BINARY", value.value_type().name()))
+                });
+                if let Some(why) = why {
+                    problems.push(format!("FailureActions: {why}"));
+                    s.failure_actions_raw = Some(bytes);
+                } else {
+                    match failure_actions(&bytes) {
+                        Ok(actions) => s.failure_actions = Some(actions),
+                        Err(why) => {
+                            problems.push(why);
+                            s.failure_actions_raw = Some(bytes);
+                        }
                     }
-                },
-                Err(why) => problem(Some(why)),
-            },
-            _ => continue,
+                }
+            }
+            _ => {}
         }
-        replayed |= value.status() == Status::Replayed;
     }
     // a shared process's DLL is under Parameters (in the key itself on older systems)
-    if let Some(parameters) = key.subkey("Parameters")
-        && let Some(value) = parameters.value("ServiceDll")
+    let (subkeys, subkey_problems) = key.subkeys();
+    problems.extend(
+        subkey_problems
+            .into_iter()
+            .map(|why| format!("subkeys: {why}")),
+    );
+    if let Some(parameters) = subkeys
+        .iter()
+        .find(|subkey| subkey.name().eq_ignore_ascii_case("Parameters"))
     {
-        let (dll, why) = string(&value);
-        if dll.is_some() {
-            s.service_dll = dll;
+        replayed |= parameters.status() == Status::Replayed;
+        let (parameter_values, parameter_problems) = parameters.values();
+        problems.extend(
+            parameter_problems
+                .into_iter()
+                .map(|why| format!(r"Parameters: {why}")),
+        );
+        if let Some(value) = parameter_values
+            .iter()
+            .find(|value| value.name().eq_ignore_ascii_case("ServiceDll"))
+        {
+            let (dll, why) = string(value);
+            if dll.is_some() {
+                s.service_dll = dll;
+            }
+            if let Some(why) = why {
+                problems.push(format!(r"Parameters\ServiceDll: {why}"));
+            }
+            replayed |= value.status() == Status::Replayed;
         }
-        if let Some(why) = why {
-            problems.push(format!(r"Parameters\ServiceDll: {why}"));
-        }
-        replayed |= value.status() == Status::Replayed;
     }
     s.replayed = replayed;
     s.problems = problems;

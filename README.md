@@ -71,7 +71,7 @@ for key in hive.deleted().keys {
 // SYSTEM: the services of the control set Windows used last
 use ys_registry_parser::system::{ControlSets, services};
 let (system, _) = ys_registry_parser::open(std::path::Path::new("SYSTEM"))?;
-let current = ControlSets::read(&system).current.unwrap_or(1);
+let current = ControlSets::read(&system).current_or_first().unwrap_or(1);
 for service in services(&system, current).map(|s| s.0).unwrap_or_default() {
     let actions = service.failure_actions.map(|f| f.actions).unwrap_or_default();
     println!("{} {:?} {actions:?}", service.name, service.image_path);

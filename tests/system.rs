@@ -11,7 +11,7 @@ use ys_registry_parser::system::{
     start_name, type_names,
 };
 
-fn system() -> Hive {
+fn system_bytes() -> Vec<u8> {
     let path = format!(
         "{}/tests/fixtures/regipy/SYSTEM.gz",
         env!("CARGO_MANIFEST_DIR")
@@ -20,7 +20,21 @@ fn system() -> Hive {
     flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
         .read_to_end(&mut data)
         .unwrap();
+    data
+}
+
+fn open(data: Vec<u8>) -> Hive {
     Hive::open(data, &[]).unwrap().0
+}
+
+fn system() -> Hive {
+    open(system_bytes())
+}
+
+fn value_offset(data: &[u8], path: &str, name: &str) -> usize {
+    let hive = open(data.to_vec());
+    let offset = hive.key(path).unwrap().value(name).unwrap().offset() as usize;
+    4096 + offset
 }
 
 #[test]
@@ -122,4 +136,107 @@ fn services_of_each_control_set() {
         .filter(|s| s.failure_actions.is_some())
         .count();
     assert_eq!(with_actions, 133);
+}
+
+#[test]
+fn an_unusable_current_control_set_falls_back_to_the_first_present() {
+    let mut data = system_bytes();
+    let cell = value_offset(&data, "Select", "Current");
+    // The resident DWORD is the vk record's data-offset field.
+    data[cell + 12..cell + 16].copy_from_slice(&99u32.to_le_bytes());
+
+    let hive = open(data);
+    let sets = ControlSets::read(&hive);
+    assert_eq!(sets.current, Some(99));
+    assert_eq!(sets.current_or_first(), Some(1));
+    assert_eq!(computer_name(&hive).as_deref(), Some("WKS-WIN732BITA"));
+
+    let mut wrong_type = system_bytes();
+    let cell = value_offset(&wrong_type, "Select", "Current");
+    wrong_type[cell + 16..cell + 20].copy_from_slice(&5u32.to_le_bytes());
+    let hive = open(wrong_type);
+    let sets = ControlSets::read(&hive);
+    assert_eq!(sets.current, None);
+    assert_eq!(sets.current_or_first(), Some(1));
+}
+
+#[test]
+fn service_numbers_must_be_dwords() {
+    let mut data = system_bytes();
+    let cell = value_offset(&data, r"ControlSet001\Services\eventlog", "Start");
+    // The type is 12 bytes into the vk record, after the cell's four-byte header.
+    data[cell + 16..cell + 20].copy_from_slice(&11u32.to_le_bytes());
+
+    let hive = open(data);
+    let eventlog = services(&hive, 1)
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|service| service.name == "eventlog")
+        .unwrap();
+    assert_eq!(eventlog.start, None);
+    assert!(
+        eventlog
+            .problems
+            .iter()
+            .any(|problem| problem == "Start: is REG_QWORD, not REG_DWORD")
+    );
+}
+
+#[test]
+fn failure_actions_must_be_binary_and_keep_malformed_bytes() {
+    let original = system_bytes();
+    let cell = value_offset(
+        &original,
+        r"ControlSet001\Services\eventlog",
+        "FailureActions",
+    );
+
+    let mut wrong_type = original.clone();
+    wrong_type[cell + 16..cell + 20].copy_from_slice(&1u32.to_le_bytes());
+    let hive = open(wrong_type);
+    let eventlog = services(&hive, 1)
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|service| service.name == "eventlog")
+        .unwrap();
+    assert_eq!(eventlog.failure_actions, None);
+    assert!(
+        eventlog
+            .failure_actions_raw
+            .as_ref()
+            .is_some_and(|b| !b.is_empty())
+    );
+    assert!(
+        eventlog
+            .problems
+            .iter()
+            .any(|problem| problem == "FailureActions: is REG_SZ, not REG_BINARY")
+    );
+
+    let mut cut_short = original;
+    cut_short[cell + 8..cell + 12].copy_from_slice(&0x10_000u32.to_le_bytes());
+    let hive = open(cut_short);
+    let eventlog = services(&hive, 1)
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|service| service.name == "eventlog")
+        .unwrap();
+    assert_eq!(eventlog.failure_actions, None);
+    assert!(
+        eventlog
+            .failure_actions_raw
+            .as_ref()
+            .is_some_and(|b| !b.is_empty())
+    );
+    assert!(
+        eventlog
+            .problems
+            .iter()
+            .any(|problem| problem.starts_with("FailureActions: ") && problem.contains("cut short")),
+        "{:?}",
+        eventlog.problems
+    );
 }
