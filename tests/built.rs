@@ -3,6 +3,7 @@
 //! and values with their parents in use, deleted or lost.
 #![allow(clippy::unwrap_used, clippy::cast_possible_wrap)]
 
+use ys_registry_parser::ntuser::recent_docs;
 use ys_registry_parser::{Data, Hive, Status, decode};
 
 /// 2022-02-08T21:03:52Z.
@@ -432,4 +433,96 @@ fn deleted_keys_and_values() {
         .map(|v| (v.offset, v.name.as_str(), v.data.as_slice()))
         .collect();
     assert_eq!(leftovers, [(leftover, "Leftover", &[9u8, 0, 0, 0][..])]);
+}
+
+/// The MRU list of the values `list`, ended.
+fn mru(list: &[u32]) -> Vec<u8> {
+    list.iter()
+        .chain(&[u32::MAX])
+        .flat_map(|n| n.to_le_bytes())
+        .collect()
+}
+
+/// A recent document's place, value, name and problems.
+type Item<'a> = (Option<u32>, u32, Option<&'a str>, Vec<String>);
+
+#[test]
+fn recent_docs_that_dont_add_up() {
+    let mut b = Builder::new();
+    let doc = |name: &str| utf16z(name);
+    // RecentDocs: its list names a value that isn't there, a value it doesn't list, a value
+    // that isn't a numbered item, an item of the wrong type; .txt: no MRUListEx
+    let values = [
+        b.value("MRUListEx", 3, &mru(&[2, 5, 0, 2]), false),
+        b.value("0", 3, &doc("a.txt"), false),
+        b.value("2", 3, &doc("b.docx"), false),
+        b.value("3", 1, &doc("c.pdf"), false),
+        b.value("ViewStream", 3, &[1, 2, 3, 4, 5], false),
+    ];
+    let txt_values = [b.value("0", 3, &doc("a.txt"), false)];
+    let txt = b.key(".txt", 0, &[], &txt_values, false);
+    let mut key = b.key("RecentDocs", 0, &[txt], &values, false);
+    for name in [
+        "Explorer",
+        "CurrentVersion",
+        "Windows",
+        "Microsoft",
+        "Software",
+    ] {
+        key = b.key(name, 0, &[key], &[], false);
+    }
+    let root = b.root(&[key]);
+    let hive = Hive::from_bytes(b.hive(root)).unwrap();
+    let (lists, _) = recent_docs(&hive).unwrap();
+    let all = &lists[0];
+    assert_eq!(
+        all.problems,
+        [
+            "MRUListEx: 2 is listed twice",
+            r#"value "ViewStream" is not a numbered item"#
+        ]
+    );
+    let items: Vec<Item> = all
+        .items
+        .iter()
+        .map(|i| {
+            (
+                i.mru_position,
+                i.value_index,
+                i.name.as_deref(),
+                i.problems.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            (Some(0), 2, Some("b.docx"), vec![]),
+            (
+                Some(1),
+                5,
+                None,
+                vec!["MRUListEx lists value 5, which is not there".to_owned()]
+            ),
+            (Some(2), 0, Some("a.txt"), vec![]),
+            (
+                None,
+                3,
+                Some("c.pdf"),
+                vec![
+                    "MRUListEx doesn't list it".to_owned(),
+                    "is REG_SZ, not REG_BINARY".to_owned()
+                ]
+            ),
+        ]
+    );
+    // the bytes of what doesn't decode are kept
+    assert!(all.items[3].raw.is_some() && all.items[0].raw.is_none());
+    let txt = &lists[1];
+    assert_eq!(txt.extension.as_deref(), Some(".txt"));
+    assert_eq!(
+        txt.problems,
+        ["it has no MRUListEx: its items' order is unknown"]
+    );
+    assert_eq!(txt.items[0].mru_position, None);
 }

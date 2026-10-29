@@ -19,3 +19,6 @@ First version. (@YamatoSecurity)
 - `system`: a `SYSTEM` hive's control sets (`ControlSets`), computer name (`computer_name`) and
   services (`services`, `Service`), with `FailureActions` decoded (`failure_actions`) and names for
   start, type and error control values.
+- `ntuser`: an `NTUSER.DAT` hive's recent documents (`recent_docs`, `RecentDocs`, `RecentDoc`) in
+  their `MRUListEx` order (`mru_list_ex`), with each item's name and its shortcut's name
+  (`recent_doc_data`), and the profile's name (`profile_name`).
