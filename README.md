@@ -38,6 +38,14 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   cell that is in use again is reported, not taken for the deleted record's. Deleted values no
   deleted key lists are kept apart: their key is unknown. In a replayed hive, `replayed` says
   which deleted records the logs wrote.
+- `SYSTEM` hives (`system`): the control sets `Select` names and those the hive has
+  (`ControlSets`), the computer's name (`computer_name`), and a control set's services
+  (`services`): display name, description, image path, service DLL (`Parameters\ServiceDll`),
+  start, delayed start, type, error control, account, group, failure command and failure
+  actions, each service with the problems its values have. `failure_actions` decodes a
+  `FailureActions` value (`SERVICE_FAILURE_ACTIONS`: reset period, whether a reboot message and a
+  command are set, then each action and its delay); `start_name`, `type_names` and
+  `error_control_name` name the numbers.
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
@@ -59,6 +67,15 @@ for value in run.values().0 {
 for key in hive.deleted().keys {
     println!("deleted: {} ({} values)", key.path, key.values.len());
 }
+
+// SYSTEM: the services of the control set Windows used last
+use ys_registry_parser::system::{ControlSets, services};
+let (system, _) = ys_registry_parser::open(std::path::Path::new("SYSTEM"))?;
+let current = ControlSets::read(&system).current.unwrap_or(1);
+for service in services(&system, current).map(|s| s.0).unwrap_or_default() {
+    let actions = service.failure_actions.map(|f| f.actions).unwrap_or_default();
+    println!("{} {:?} {actions:?}", service.name, service.image_path);
+}
 ```
 
 From Cargo, by commit:
@@ -79,11 +96,15 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
 - Deleted keys and values on 7 hives: the same deleted keys as yarp's scanner finds in free cells,
   and the same values; their data differs where a value's data cell is in use again (reported
   here, its bytes not taken for the deleted value's).
+- Services on regipy's Windows 7 `SYSTEM` (both control sets, 933 services) and on the DFIR
+  Artifact Museum's dirty Windows 11 `SYSTEM` with its logs (718): every value read and every
+  `FailureActions` decoded the same as by a reader built on yarp.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
-  and deleted keys under keys in use, deleted or lost; the replay on built logs; random damage.
+  and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
+  (control sets, computer name, services); random damage.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: deleted records in the slack of cells in use, in the data past the hive bins, or in the

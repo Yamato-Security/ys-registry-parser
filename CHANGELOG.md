@@ -16,3 +16,6 @@ First version. (@YamatoSecurity)
 - Deleted keys and values from free cells (`Hive::deleted`), with deleted keys' paths rebuilt
   from their parents.
 - `open` and `open_with`: a hive file, with the logs next to it or given ones.
+- `system`: a `SYSTEM` hive's control sets (`ControlSets`), computer name (`computer_name`) and
+  services (`services`, `Service`), with `FailureActions` decoded (`failure_actions`) and names for
+  start, type and error control values.
