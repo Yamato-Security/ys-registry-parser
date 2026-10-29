@@ -551,6 +551,21 @@ mod tests {
             Some("Long name.lnk")
         );
 
+        let mut invalid = file_entry("SHORT.LNK", "x");
+        let name_at = invalid
+            .windows(4)
+            .position(|bytes| bytes == BEEF0004.to_le_bytes())
+            .map_or(0, |at| at + 42);
+        invalid[name_at..name_at + 2].copy_from_slice(&0xd800u16.to_le_bytes());
+        let mut bytes = utf16("invalid.txt\0");
+        bytes.extend(invalid);
+        let data = recent_doc_data(&bytes);
+        assert_eq!(data.link_name.as_deref(), Some("�"));
+        assert_eq!(
+            data.problems,
+            ["its 0xBEEF0004 long name is not valid UTF-16: decoded lossily"]
+        );
+
         let mut cut = vec![14, 0, 0x32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         cut.extend_from_slice(b"BROKEN");
         let cut_size = u16::try_from(cut.len()).unwrap_or(0);
