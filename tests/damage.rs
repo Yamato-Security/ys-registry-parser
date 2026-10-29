@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::ntuser::{profile_name, recent_docs};
 use ys_registry_parser::system::{ControlSets, computer_name, services};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -23,6 +24,12 @@ fn fixture(name: &str) -> Vec<u8> {
 fn system() -> &'static [u8] {
     static SYSTEM: OnceLock<Vec<u8>> = OnceLock::new();
     SYSTEM.get_or_init(|| fixture("SYSTEM"))
+}
+
+/// The NTUSER.DAT hive, unpacked once.
+fn ntuser() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
 }
 
 /// Flip bytes of `data` past its base block.
@@ -52,6 +59,7 @@ fn read_all(data: Vec<u8>) {
     for set in sets.present {
         let _ = services(&hive, set);
     }
+    let _ = (recent_docs(&hive), profile_name(&hive));
 }
 
 proptest! {
@@ -79,5 +87,12 @@ proptest! {
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
     ) {
         read_all(damage(system().to_vec(), flips));
+    }
+
+    #[test]
+    fn a_damaged_ntuser_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        read_all(damage(ntuser().to_vec(), flips));
     }
 }

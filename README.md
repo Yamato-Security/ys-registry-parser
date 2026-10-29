@@ -46,6 +46,12 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `FailureActions` value (`SERVICE_FAILURE_ACTIONS`: reset period, whether a reboot message and a
   command are set, then each action and its delay); `start_name`, `type_names` and
   `error_control_name` name the numbers.
+- `NTUSER.DAT` hives (`ntuser`): Explorer's recent documents (`recent_docs`), from `RecentDocs`
+  and each of its subkeys (one per extension, and `Folder`): every item in the order of the key's
+  `MRUListEx` (`mru_list_ex`), its name, and the name of its shortcut in the `Recent` folder (the
+  long name in the file entry shell item's `0xBEEF0004` block, else its short name); items the
+  list names but the key hasn't, and values the list doesn't name, are reported. `profile_name`
+  gives the profile folder's name (`alice` for `C:\Users\alice`) from the shell folders' paths.
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
@@ -99,12 +105,17 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
 - Services on regipy's Windows 7 `SYSTEM` (both control sets, 933 services) and on the DFIR
   Artifact Museum's dirty Windows 11 `SYSTEM` with its logs (718): every value read and every
   `FailureActions` decoded the same as by a reader built on yarp.
+- Recent documents on 9 public `NTUSER.DAT` hives (regipy's, notatin's and the DFIR Artifact
+  Museum's, the dirty ones with their logs; 593 items): the same order, names and shortcut names
+  as a reader built on yarp and [libfwsi](https://github.com/libyal/libfwsi)'s shell item
+  parser.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
   and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
-  (control sets, computer name, services); random damage.
+  (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile); recent
+  documents whose list and values don't add up; random damage.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: deleted records in the slack of cells in use, in the data past the hive bins, or in the
