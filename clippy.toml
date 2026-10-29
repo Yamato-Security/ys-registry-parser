@@ -1,0 +1,6 @@
+# Tests unwrap to fail loudly.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Format names that look like code identifiers to doc_markdown.
+doc-valid-idents = ["FILETIME", "FILETIMEs", "DFIR", "UsrClass", "NTUSER", "Amcache", "ControlSet001", ".."]

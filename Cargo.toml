@@ -1,0 +1,38 @@
+[package]
+name = "ys-registry-parser"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.99"
+authors = ["Zach Mathis (@yamatosecurity)"]
+description = "Windows registry hives for forensics: every key and value with last-write times, types and data, dirty hives' transaction logs replayed, and deleted keys and values recovered from free cells."
+license = "Apache-2.0"
+repository = "https://github.com/Yamato-Security/ys-registry-parser"
+homepage = "https://github.com/Yamato-Security/ys-registry-parser"
+readme = "README.md"
+keywords = ["forensics", "dfir", "registry", "windows", "regf"]
+categories = ["parser-implementations"]
+publish = false
+# Sources only: the test hives stay in the repository.
+include = ["/src", "/README.md", "/LICENSE", "/CHANGELOG.md"]
+
+[dependencies]
+
+[dev-dependencies]
+flate2 = "1"
+proptest = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+unwrap_used = { level = "deny", priority = 0 }
+expect_used = { level = "deny", priority = 0 }
+module_name_repetitions = { level = "allow", priority = 1 }
+must_use_candidate = { level = "allow", priority = 1 }
+missing_errors_doc = { level = "allow", priority = 1 }
+cast_possible_truncation = { level = "allow", priority = 1 }
