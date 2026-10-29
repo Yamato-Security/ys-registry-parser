@@ -22,3 +22,7 @@ First version. (@YamatoSecurity)
 - `ntuser`: an `NTUSER.DAT` hive's recent documents (`recent_docs`, `RecentDocs`, `RecentDoc`) in
   their `MRUListEx` order (`mru_list_ex`), with each item's name and its shortcut's name
   (`recent_doc_data`), and the profile's name (`profile_name`).
+- `software`: a `SOFTWARE` hive's Task Scheduler cache (`task_cache`, `ScheduledTask`): each task
+  from its `Tree` entry and `Tasks` key, its lists, whether its security descriptor is there,
+  `Actions` decoded by their structure (`task_actions`, `TaskActions`, `TaskAction`: exec, COM
+  handler, e-mail, message box) and `DynamicInfo` (`dynamic_info`).

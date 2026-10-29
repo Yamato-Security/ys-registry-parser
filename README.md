@@ -52,6 +52,16 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   long name in the file entry shell item's `0xBEEF0004` block, else its short name); items the
   list names but the key hasn't, and values the list doesn't name, are reported. `profile_name`
   gives the profile folder's name (`alice` for `C:\Users\alice`) from the shell folders' paths.
+- `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
+  `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
+  Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
+  lists it is in (`Boot`, `Logon`, `Plain`, `Maintenance`), and tasks with only one of the two.
+  `task_actions` decodes `Actions` by its structure, versions 1, 2 and 3 (including Windows
+  Server 2016-era and current Windows 10+ layouts): the context, then each exec (program,
+  arguments, working directory),
+  COM handler (class id, data), e-mail and message box action, as far as the bytes go;
+  `dynamic_info` decodes `DynamicInfo` (last registered, last run, state, last result, last
+  successful run).
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
@@ -109,13 +119,20 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, the dirty ones with their logs; 593 items): the same order, names and shortcut names
   as a reader built on yarp and [libfwsi](https://github.com/libyal/libfwsi)'s shell item
   parser.
+- The Task Scheduler's cache on 7 public `SOFTWARE` hives (regipy's Windows 7 and the DFIR
+  Artifact Museum's Windows 10, 11, Server 2012 R2 and Server 2022 ones, the dirty ones with
+  their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
+  tasks, lists, actions and times as a separate decoder built on yarp, every `Actions` value
+  decoded to its last byte.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
   and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
   (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile); recent
-  documents whose list and values don't add up; random damage.
+  documents whose list and values don't add up; a task cache built with real Windows 11 `Actions`
+  and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
+  way round, and `Actions` cut short; random damage, and random `Actions`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: deleted records in the slack of cells in use, in the data past the hive bins, or in the
