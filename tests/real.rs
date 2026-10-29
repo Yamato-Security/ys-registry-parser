@@ -81,7 +81,13 @@ fn values_of_each_type() {
     };
     assert_eq!(
         value(r"AppEvents\EventLabels\.Default", ""),
-        ("REG_SZ".into(), Data::Text("Default Beep".into()))
+        (
+            "REG_SZ".into(),
+            Data::Text {
+                value: "Default Beep".into(),
+                lossy: false
+            }
+        )
     );
     assert_eq!(
         value(
@@ -90,7 +96,10 @@ fn values_of_each_type() {
         ),
         (
             "REG_EXPAND_SZ".into(),
-            Data::Text("@ieframe.dll,-12513".into())
+            Data::Text {
+                value: "@ieframe.dll,-12513".into(),
+                lossy: false
+            }
         )
     );
     assert_eq!(
@@ -100,10 +109,13 @@ fn values_of_each_type() {
         ),
         (
             "REG_MULTI_SZ".into(),
-            Data::MultiText(vec![
-                "Microsoft Enhanced Cryptographic Provider v1.0".into(),
-                "Microsoft Base Cryptographic Provider v1.0".into()
-            ])
+            Data::MultiText {
+                values: vec![
+                    "Microsoft Enhanced Cryptographic Provider v1.0".into(),
+                    "Microsoft Base Cryptographic Provider v1.0".into()
+                ],
+                lossy: false
+            }
         )
     );
     assert_eq!(

@@ -79,10 +79,22 @@ impl ValueType {
 /// A value's data, decoded by its type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Data {
-    /// `REG_SZ`, `REG_EXPAND_SZ`, `REG_LINK`: UTF-16 up to the first NUL.
-    Text(String),
+    /// `REG_SZ`, `REG_EXPAND_SZ`, `REG_LINK`: UTF-16 up to the first NUL. `lossy` says an odd
+    /// byte was dropped or an invalid code unit was replaced.
+    Text {
+        /// The decoded text.
+        value: String,
+        /// Whether decoding dropped an odd byte or replaced an invalid UTF-16 code unit.
+        lossy: bool,
+    },
     /// `REG_MULTI_SZ`: the strings, without the empty ones the terminating NULs leave at the end.
-    MultiText(Vec<String>),
+    /// `lossy` has the same meaning as for [`Data::Text`].
+    MultiText {
+        /// The decoded strings.
+        values: Vec<String>,
+        /// Whether decoding dropped an odd byte or replaced an invalid UTF-16 code unit.
+        lossy: bool,
+    },
     /// `REG_DWORD`, `REG_DWORD_BIG_ENDIAN`, `REG_QWORD`.
     Number(u64),
     /// `REG_BINARY`, `REG_NONE` and the resource types: the bytes are the data.
@@ -112,10 +124,17 @@ pub fn decode(code: u32, bytes: &[u8]) -> Data {
         ValueType::Sz | ValueType::ExpandSz | ValueType::Link => {
             let units = utf16_units(bytes);
             let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
-            Data::Text(String::from_utf16_lossy(&units[..end]))
+            Data::Text {
+                value: String::from_utf16_lossy(&units[..end]),
+                lossy: !bytes.len().is_multiple_of(2) || String::from_utf16(&units[..end]).is_err(),
+            }
         }
         ValueType::MultiSz => {
             let units = utf16_units(bytes);
+            let lossy = !bytes.len().is_multiple_of(2)
+                || units
+                    .split(|&u| u == 0)
+                    .any(|item| String::from_utf16(item).is_err());
             let mut items: Vec<String> = units
                 .split(|&u| u == 0)
                 .map(String::from_utf16_lossy)
@@ -123,7 +142,10 @@ pub fn decode(code: u32, bytes: &[u8]) -> Data {
             while items.last().is_some_and(String::is_empty) {
                 items.pop();
             }
-            Data::MultiText(items)
+            Data::MultiText {
+                values: items,
+                lossy,
+            }
         }
         ValueType::Dword => match sized(4) {
             Ok(()) => Data::Number(u64::from(u32::from_le_bytes([
@@ -178,13 +200,55 @@ mod tests {
 
     #[test]
     fn values_decode_by_type() {
-        assert_eq!(decode(1, &utf16("abc\0junk")), Data::Text("abc".into()));
-        assert_eq!(decode(2, &utf16("%x%\0")), Data::Text("%x%".into()));
+        assert_eq!(
+            decode(1, &utf16("abc\0junk")),
+            Data::Text {
+                value: "abc".into(),
+                lossy: false
+            }
+        );
+        assert_eq!(
+            decode(2, &utf16("%x%\0")),
+            Data::Text {
+                value: "%x%".into(),
+                lossy: false
+            }
+        );
         assert_eq!(
             decode(7, &utf16("a\0\0b c\0\0")),
-            Data::MultiText(vec!["a".into(), String::new(), "b c".into()])
+            Data::MultiText {
+                values: vec!["a".into(), String::new(), "b c".into()],
+                lossy: false
+            }
         );
-        assert_eq!(decode(7, &utf16("\0")), Data::MultiText(Vec::new()));
+        assert_eq!(
+            decode(7, &utf16("\0")),
+            Data::MultiText {
+                values: Vec::new(),
+                lossy: false
+            }
+        );
+        assert_eq!(
+            decode(1, &utf16("\u{fffd}")),
+            Data::Text {
+                value: "\u{fffd}".into(),
+                lossy: false
+            }
+        );
+        assert_eq!(
+            decode(1, &[0x00, 0xd8]),
+            Data::Text {
+                value: "\u{fffd}".into(),
+                lossy: true
+            }
+        );
+        assert_eq!(
+            decode(1, b"a"),
+            Data::Text {
+                value: String::new(),
+                lossy: true
+            }
+        );
         assert_eq!(decode(4, &[1, 0, 0, 0]), Data::Number(1));
         assert_eq!(decode(5, &[0, 0, 0, 1]), Data::Number(1));
         assert_eq!(decode(11, &u64::MAX.to_le_bytes()), Data::Number(u64::MAX));

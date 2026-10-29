@@ -404,7 +404,15 @@ fn apply_entries(st: &mut State, b: &[u8], first: u32, name: &str) -> usize {
         let size = u32_at(b, pos + 4).unwrap_or(0) as usize;
         let hbins = u32_at(b, pos + 16).unwrap_or(0);
         let count = u32_at(b, pos + 20).unwrap_or(0) as usize;
-        let pages = pos + 40 + 8 * count;
+        let Some(pages) = count
+            .checked_mul(8)
+            .and_then(|n| pos.checked_add(40)?.checked_add(n))
+        else {
+            st.messages.push(format!(
+                "{name}: the dirty-page references of the entry with sequence number {expected} overflow"
+            ));
+            break;
+        };
         let refs: Vec<(u32, u32)> = (0..count)
             .map(|i| {
                 (
@@ -414,9 +422,10 @@ fn apply_entries(st: &mut State, b: &[u8], first: u32, name: &str) -> usize {
             })
             .collect();
         let total = refs.iter().map(|r| u64::from(r.1)).sum::<u64>();
-        if total + pages as u64 > b.len() as u64 {
+        let entry_end = pos + size;
+        if total + pages as u64 > entry_end as u64 {
             st.messages.push(format!(
-                "{name}: the dirty pages of the entry with sequence number {expected} are past the end of the log"
+                "{name}: the dirty pages of the entry with sequence number {expected} are past the end of the entry"
             ));
             break;
         }
@@ -467,7 +476,10 @@ fn invalid_entry(b: &[u8], pos: usize, expected: u32) -> Option<String> {
     if size < 512 || !size.is_multiple_of(512) {
         return Some(format!("invalid size 0x{size:X}"));
     }
-    if pos + size > b.len() {
+    let Some(end) = pos.checked_add(size) else {
+        return Some("the entry size overflows".to_owned());
+    };
+    if end > b.len() {
         return Some("the entry is past the end of the log".to_owned());
     }
     let hbins = u32_at(b, pos + 16).unwrap_or(0);
@@ -475,13 +487,14 @@ fn invalid_entry(b: &[u8], pos: usize, expected: u32) -> Option<String> {
         return Some(format!("invalid hive bins data size 0x{hbins:X}"));
     }
     let count = u32_at(b, pos + 20).unwrap_or(0) as usize;
-    if count == 0 || 40 + 8 * count > size {
+    let references_end = count.checked_mul(8).and_then(|n| 40usize.checked_add(n));
+    if count == 0 || references_end.is_none_or(|end| end > size) {
         return Some(format!("invalid dirty pages count {count}"));
     }
     let hash1 = u64_at(b, pos + 24).unwrap_or(0);
     let hash2 = u64_at(b, pos + 32).unwrap_or(0);
     if marvin32(&b[pos..pos + 32], MARVIN_SEED) != hash2
-        || marvin32(&b[pos + 40..pos + size], MARVIN_SEED) != hash1
+        || marvin32(&b[pos + 40..end], MARVIN_SEED) != hash1
     {
         return Some("invalid hashes".to_owned());
     }
@@ -677,6 +690,13 @@ mod tests {
         e
     }
 
+    fn rehash_entry(e: &mut [u8]) {
+        let h1 = marvin32(&e[40..], MARVIN_SEED);
+        e[24..32].copy_from_slice(&h1.to_le_bytes());
+        let h2 = marvin32(&e[..32], MARVIN_SEED);
+        e[32..40].copy_from_slice(&h2.to_le_bytes());
+    }
+
     fn new_log(name: &str, first: u32, entries: &[Vec<u8>]) -> LogFile {
         let mut data = base_block(LOG_BASE, first, first, 6, 4096, 200);
         for e in entries {
@@ -762,6 +782,28 @@ mod tests {
                 .contains("sequence number 11 where 10")
         );
         assert!(invalid_entry(&wrong, 0, 11).is_none());
+    }
+
+    #[test]
+    fn dirty_pages_cannot_spill_into_the_next_entry() {
+        let mut first = entry(10, 4096, &[(512, page(0xA))]);
+        // The entry is 1024 bytes, and its page data begins at byte 48. Claiming 1024 bytes
+        // would consume 48 bytes of the following entry. Rehashing makes the entry header and
+        // its own bytes internally valid; the boundary check must still reject it.
+        first[44..48].copy_from_slice(&1024u32.to_le_bytes());
+        rehash_entry(&mut first);
+        let second = entry(11, 4096, &[(1024, page(0xB))]);
+        let log = new_log("SYSTEM.LOG1", 10, &[first, second]);
+        let r = replay(primary(), &[log]);
+        assert!(!r.recovered, "{:?}", r.messages);
+        assert_eq!((at(&r.bytes, 512), at(&r.bytes, 1024)), (0, 0));
+        assert!(
+            r.messages
+                .iter()
+                .any(|m| m.contains("past the end of the entry")),
+            "{:?}",
+            r.messages
+        );
     }
 
     #[test]

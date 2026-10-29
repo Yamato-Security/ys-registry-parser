@@ -191,7 +191,13 @@ impl Hive {
                 .push(format!("its value list 0x{list:x} can't be read"));
             return;
         };
-        for i in 0..count.min(cell.len() / 4) {
+        let room = cell.len() / 4;
+        if room < count {
+            key.problems.push(format!(
+                "its value list 0x{list:x} is cut short ({room} of {count} values)"
+            ));
+        }
+        for i in 0..count.min(room) {
             let Some(offset) = u32_at(cell, i * 4) else {
                 break;
             };
@@ -217,7 +223,7 @@ impl Hive {
         let vk = self
             .cell(offset)
             .filter(|vk| vk.get(..2) == Some(b"vk") && plausible_value(vk, self.bytes().len()))?;
-        let read = read_data(self, vk);
+        let read = read_data(self, vk, false);
         let replayed = self.replayed(offset) || read.cells.iter().any(|&c| self.replayed(c));
         let reused = read.cells.iter().find(|&&c| self.in_use(c));
         let (data, problem) = match reused {

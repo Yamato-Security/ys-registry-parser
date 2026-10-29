@@ -184,9 +184,9 @@ fn keys_values_and_their_types() {
     assert_eq!(
         values,
         [
-            r#"Software\Run\ = Text("the default")"#,
-            r#"Software\Run\Path = Text("%SystemRoot%\\x.exe")"#,
-            r#"Software\Run\Items = MultiText(["a", "b"])"#,
+            r#"Software\Run\ = Text { value: "the default", lossy: false }"#,
+            r#"Software\Run\Path = Text { value: "%SystemRoot%\\x.exe", lossy: false }"#,
+            r#"Software\Run\Items = MultiText { values: ["a", "b"], lossy: false }"#,
             r"Software\Run\Count = Number(7)",
             r"Software\Run\Time = Number(132888278320000000)",
             r"Software\Run\Blob = Bytes",
@@ -264,8 +264,58 @@ fn damage_does_not_hide_the_rest() {
     );
     assert_eq!(
         values[2].data(),
-        Err("its data cell 0x7ffffff8 can't be read".to_owned())
+        Err("its data cell 0x7ffffff8 is not allocated".to_owned())
     );
+}
+
+#[test]
+fn active_records_do_not_follow_free_cells() {
+    let mut b = Builder::new();
+
+    // An allocated value whose external data cell has already been freed.
+    let stale_data = b.put(&[1, 2, 3, 4, 5], true);
+    let stale = b.put(&vk("StaleData", 3, 5, stale_data), false);
+    // A value record which itself has been freed but remains in an allocated value list.
+    let deleted_value = b.value("DeletedValue", 4, &7u32.to_le_bytes(), true);
+    let active = b.key("Active", 0, &[], &[stale, deleted_value], false);
+
+    // A free value list referenced by an allocated key.
+    let live = b.value("Live", 4, &1u32.to_le_bytes(), false);
+    let free_list = b.list(&[live], true);
+    let free_list_key = b.put(&nk("FreeList", 0, (0, NONE), (1, free_list), 0x20), false);
+
+    // A free key left in the allocated root's subkey list.
+    let deleted_key = b.key("DeletedKey", 0, &[], &[], true);
+    let root = b.root(&[active, free_list_key, deleted_key]);
+    let hive = Hive::from_bytes(b.hive(root)).unwrap();
+
+    let entries: Vec<_> = hive.walk().collect();
+    assert_eq!(
+        entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        ["", "Active", "FreeList"]
+    );
+    assert!(entries[0].problems.iter().any(|p| p.contains("not a key")));
+
+    let active = hive.key("Active").unwrap();
+    let (values, problems) = active.values();
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0].name(), "StaleData");
+    assert!(problems.iter().any(|p| p.contains("not a value")));
+    assert_eq!(
+        values[0].read_data(),
+        (
+            Vec::new(),
+            Some(format!("its data cell 0x{stale_data:x} is not allocated"))
+        )
+    );
+
+    let (values, problems) = hive.key("FreeList").unwrap().values();
+    assert!(values.is_empty());
+    assert!(problems.iter().any(|p| p.contains("can't be read")));
+
+    let deleted = hive.deleted();
+    assert!(deleted.keys.iter().any(|k| k.offset == deleted_key));
+    assert!(deleted.values.iter().any(|v| v.offset == deleted_value));
 }
 
 #[test]
@@ -317,6 +367,13 @@ fn deleted_keys_and_values() {
     let orphan = b.key("Orphan", 0x10, &[], &[], true);
     let reused = b.value("Reused", 4, &[1, 0, 0, 0], false);
     let reusing = b.key("Reusing", software, &[], &[reused], true);
+    // A deleted key whose list has room for one of the two values it declares.
+    let partial_value = b.value("Partial", 4, &[2, 0, 0, 0], true);
+    let partial_list = b.list(&[partial_value], true);
+    let partial = b.put(
+        &nk("PartialKey", software, (0, NONE), (2, partial_list), 0x20),
+        true,
+    );
     // a deleted value no deleted key lists
     let leftover = b.value("Leftover", 4, &[9, 0, 0, 0], true);
     let hive = Hive::from_bytes(b.hive(root)).unwrap();
@@ -343,6 +400,7 @@ fn deleted_keys_and_values() {
             (child, r"Software\Gone\Child", true, 0, 0),
             (orphan, r"[unknown]\Orphan", false, 0, 0),
             (reusing, r"Software\Reusing", true, 0, 1),
+            (partial, r"Software\PartialKey", true, 1, 1),
         ]
     );
     let value = &deleted.keys[0].values[0];
@@ -350,11 +408,23 @@ fn deleted_keys_and_values() {
         (value.offset, value.name.as_str(), value.data_type),
         (run, "Run", 1)
     );
-    assert_eq!(decode(1, &value.data), Data::Text(r"C:\evil.exe".into()));
+    assert_eq!(
+        decode(1, &value.data),
+        Data::Text {
+            value: r"C:\evil.exe".into(),
+            lossy: false
+        }
+    );
     assert_eq!(deleted.keys[0].last_written, WHEN);
     assert_eq!(
         deleted.keys[3].problems,
         [format!("value 0x{reused:x} is in use again")]
+    );
+    assert_eq!(
+        deleted.keys[4].problems,
+        [format!(
+            "its value list 0x{partial_list:x} is cut short (1 of 2 values)"
+        )]
     );
     let leftovers: Vec<(u32, &str, &[u8])> = deleted
         .values

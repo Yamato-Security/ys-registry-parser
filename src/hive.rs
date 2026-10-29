@@ -247,11 +247,19 @@ impl Hive {
 
     /// Whether the cell at `offset` is in use (its size is negative).
     pub(crate) fn in_use(&self, offset: u32) -> bool {
-        i32_at(&self.bytes, BASE + offset as usize).is_some_and(|s| s < 0)
+        BASE.checked_add(offset as usize)
+            .and_then(|start| i32_at(&self.bytes, start))
+            .is_some_and(|s| s < 0)
+    }
+
+    /// The data of an allocated cell. Active Registry structures must never follow a pointer
+    /// into a free cell: those bytes are deleted evidence, not current state.
+    fn allocated_cell(&self, offset: u32) -> Option<&[u8]> {
+        self.in_use(offset).then(|| self.cell(offset)).flatten()
     }
 
     pub(crate) fn key_at(&self, offset: u32) -> Option<Key<'_>> {
-        let nk = self.cell(offset)?;
+        let nk = self.allocated_cell(offset)?;
         (nk.len() >= NK_FIXED && nk.get(..2) == Some(b"nk")).then_some(Key {
             hive: self,
             offset,
@@ -260,7 +268,7 @@ impl Hive {
     }
 
     fn value_at(&self, offset: u32) -> Option<Value<'_>> {
-        let vk = self.cell(offset)?;
+        let vk = self.allocated_cell(offset)?;
         (vk.len() >= VK_FIXED && vk.get(..2) == Some(b"vk")).then_some(Value {
             hive: self,
             offset,
@@ -274,7 +282,9 @@ impl Hive {
         let Some(original) = &self.original else {
             return false;
         };
-        let start = BASE + offset as usize;
+        let Some(start) = BASE.checked_add(offset as usize) else {
+            return false;
+        };
         let size = i32_at(&self.bytes, start).map_or(0, |s| s.unsigned_abs() as usize);
         let end = start.saturating_add(size.max(4)).min(self.bytes.len());
         original.get(start..end) != self.bytes.get(start..end)
@@ -437,7 +447,7 @@ impl<'h> Key<'h> {
     pub fn class_name(&self) -> Option<String> {
         let offset = u32_at(self.nk, 0x30).filter(|&o| o != u32::MAX)?;
         let len = usize::from(u16_at(self.nk, 0x4a)?);
-        let cell = self.hive.cell(offset)?;
+        let cell = self.hive.allocated_cell(offset)?;
         Some(name(cell.get(..len)?, false))
     }
 
@@ -500,7 +510,7 @@ impl<'h> Key<'h> {
             problems.push(format!("subkey list 0x{offset:x} is listed again"));
             return;
         }
-        let Some(cell) = self.hive.cell(offset) else {
+        let Some(cell) = self.hive.allocated_cell(offset) else {
             problems.push(format!("subkey list 0x{offset:x} can't be read"));
             return;
         };
@@ -550,7 +560,7 @@ impl<'h> Key<'h> {
         if count == 0 || list == u32::MAX {
             return (Vec::new(), Vec::new());
         }
-        let Some(cell) = self.hive.cell(list) else {
+        let Some(cell) = self.hive.allocated_cell(list) else {
             return (
                 Vec::new(),
                 vec![format!("value list 0x{list:x} can't be read")],
@@ -634,7 +644,7 @@ impl Value<'_> {
     /// short): the bytes read are kept.
     #[must_use]
     pub fn read_data(&self) -> (Vec<u8>, Option<String>) {
-        let read = read_data(self.hive, self.vk);
+        let read = read_data(self.hive, self.vk, true);
         (read.bytes, read.problem)
     }
 
@@ -653,7 +663,7 @@ impl Value<'_> {
     #[must_use]
     pub fn status(&self) -> Status {
         let changed = self.hive.replayed(self.offset)
-            || read_data(self.hive, self.vk)
+            || read_data(self.hive, self.vk, true)
                 .cells
                 .iter()
                 .any(|&c| self.hive.replayed(c));
@@ -688,8 +698,9 @@ pub(crate) struct DataRead {
 }
 
 /// The data of the value whose record is `vk`: in the value itself, in a cell, or in the
-/// segments of a big data (`db`) record. Cells are read in use or free.
-pub(crate) fn read_data(hive: &Hive, vk: &[u8]) -> DataRead {
+/// segments of a big data (`db`) record. `allocated_only` keeps active values from following
+/// pointers into free cells; deleted-value recovery deliberately reads either kind.
+pub(crate) fn read_data(hive: &Hive, vk: &[u8], allocated_only: bool) -> DataRead {
     let raw = u32_at(vk, 4).unwrap_or(0);
     let offset = u32_at(vk, 8).unwrap_or(u32::MAX);
     let mut read = DataRead {
@@ -711,6 +722,10 @@ pub(crate) fn read_data(hive: &Hive, vk: &[u8]) -> DataRead {
     if len == 0 {
         return read;
     }
+    if allocated_only && !hive.in_use(offset) {
+        read.problem = Some(format!("its data cell 0x{offset:x} is not allocated"));
+        return read;
+    }
     let Some(cell) = hive.cell(offset) else {
         read.problem = Some(format!("its data cell 0x{offset:x} can't be read"));
         return read;
@@ -719,6 +734,12 @@ pub(crate) fn read_data(hive: &Hive, vk: &[u8]) -> DataRead {
     if len > SEGMENT && hive.minor_version() >= 4 && cell.get(..2) == Some(b"db") {
         let count = usize::from(u16_at(cell, 2).unwrap_or(0));
         let list_offset = u32_at(cell, 4).unwrap_or(u32::MAX);
+        if allocated_only && !hive.in_use(list_offset) {
+            read.problem = Some(format!(
+                "its big data segment list 0x{list_offset:x} is not allocated"
+            ));
+            return read;
+        }
         let Some(list) = hive.cell(list_offset) else {
             read.problem = Some(format!(
                 "its big data segment list 0x{list_offset:x} can't be read"
@@ -730,6 +751,12 @@ pub(crate) fn read_data(hive: &Hive, vk: &[u8]) -> DataRead {
             let Some(segment_offset) = u32_at(list, i * 4) else {
                 break;
             };
+            if allocated_only && !hive.in_use(segment_offset) {
+                read.problem = Some(format!(
+                    "its big data segment 0x{segment_offset:x} is not allocated"
+                ));
+                break;
+            }
             let Some(segment) = hive.cell(segment_offset) else {
                 break;
             };
@@ -743,7 +770,7 @@ pub(crate) fn read_data(hive: &Hive, vk: &[u8]) -> DataRead {
     } else {
         read.bytes = cell[..len.min(cell.len())].to_vec();
     }
-    if read.bytes.len() < len {
+    if read.bytes.len() < len && read.problem.is_none() {
         read.problem = Some(format!(
             "its data is cut short ({} of {len} bytes)",
             read.bytes.len()

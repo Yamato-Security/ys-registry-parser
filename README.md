@@ -23,8 +23,10 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   (up to 4 bytes), in a cell, or in the segments of a big data record. `decode` turns data into
   text (`REG_SZ`, `REG_EXPAND_SZ`, `REG_LINK`), a list (`REG_MULTI_SZ`), a number (`REG_DWORD`,
   `REG_DWORD_BIG_ENDIAN`, `REG_QWORD`) or bytes (`REG_BINARY` and the rest), and says when data
-  isn't what its type says (a `REG_DWORD` of 3 bytes). `filetime` turns a FILETIME (a key's
-  last-write time, or a `REG_QWORD` holding one) into Unix seconds and nanoseconds.
+  isn't what its type says (a `REG_DWORD` of 3 bytes). Decoded text carries a `lossy` flag, so an
+  odd trailing byte or invalid UTF-16 surrogate can be distinguished from a valid literal U+FFFD
+  and the original bytes preserved when needed. `filetime` turns a FILETIME (a key's last-write
+  time, or a `REG_QWORD` holding one) into Unix seconds and nanoseconds.
 - Transaction logs (`Hive::open`, `find_logs`): a dirty hive's `.LOG1` and `.LOG2` (or `.LOG`),
   new format (`HvLE` entries, checked by their Marvin32 hashes and sequence numbers) and old
   format (`DIRT`), replayed as Windows replays them; `Recovery` says what was applied and why a
