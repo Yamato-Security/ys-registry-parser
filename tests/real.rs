@@ -200,4 +200,28 @@ fn deleted_keys_and_values() {
     let (hive, _) = open("NTUSER.DAT", &[]);
     let deleted = hive.deleted();
     assert_eq!((deleted.keys.len(), deleted.values.len()), (0, 29));
+    assert!(deleted.values.iter().all(|v| !v.replayed));
+}
+
+#[test]
+fn deleted_after_the_logs() {
+    // the logs free cells and write over others: fewer deleted records, some from the logs
+    let (hive, _) = open("UsrClass.dat", &["UsrClass.dat.LOG1", "UsrClass.dat.LOG2"]);
+    let deleted = hive.deleted();
+    let values: Vec<_> = deleted
+        .keys
+        .iter()
+        .flat_map(|k| &k.values)
+        .chain(&deleted.values)
+        .collect();
+    assert_eq!(
+        (
+            deleted.keys.len(),
+            deleted.keys.iter().filter(|k| k.replayed).count(),
+            values.len(),
+            values.iter().filter(|v| v.replayed).count(),
+            deleted.values.len(),
+        ),
+        (36, 1, 108, 11, 15)
+    );
 }

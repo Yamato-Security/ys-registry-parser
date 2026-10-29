@@ -49,6 +49,8 @@ pub struct DeletedKey {
     pub values: Vec<DeletedValue>,
     /// What of it was lost: a value list or value whose cell is in use again or can't be read.
     pub problems: Vec<String>,
+    /// Whether the transaction logs' replay wrote its cell.
+    pub replayed: bool,
 }
 
 /// A deleted value.
@@ -66,6 +68,8 @@ pub struct DeletedValue {
     pub data: Vec<u8>,
     /// Why its data couldn't all be read.
     pub problem: Option<String>,
+    /// Whether the transaction logs' replay wrote its cell or its data's.
+    pub replayed: bool,
 }
 
 impl Hive {
@@ -124,6 +128,7 @@ impl Hive {
                     path_complete,
                     values: Vec::new(),
                     problems: Vec::new(),
+                    replayed: self.replayed(offset),
                 };
                 self.deleted_values(nk, &mut key, &mut listed);
                 Some(key)
@@ -213,6 +218,7 @@ impl Hive {
             .cell(offset)
             .filter(|vk| vk.get(..2) == Some(b"vk") && plausible_value(vk, self.bytes().len()))?;
         let read = read_data(self, vk);
+        let replayed = self.replayed(offset) || read.cells.iter().any(|&c| self.replayed(c));
         let reused = read.cells.iter().find(|&&c| self.in_use(c));
         let (data, problem) = match reused {
             Some(c) => (
@@ -228,6 +234,7 @@ impl Hive {
             size: u32_at(vk, 4).unwrap_or(0) & !DATA_IN_VALUE,
             data,
             problem,
+            replayed,
         })
     }
 }

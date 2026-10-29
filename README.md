@@ -34,7 +34,8 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   writes (`Status::Deleted`). A deleted key's path is rebuilt from its parents, in use or deleted
   too (`[unknown]` where a parent is lost), and its values are read through its value list; a
   cell that is in use again is reported, not taken for the deleted record's. Deleted values no
-  deleted key lists are kept apart: their key is unknown.
+  deleted key lists are kept apart: their key is unknown. In a replayed hive, `replayed` says
+  which deleted records the logs wrote.
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
