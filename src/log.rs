@@ -159,23 +159,35 @@ pub(crate) fn entries(files: &[LogFile]) -> Vec<LogEntry> {
                     continue;
                 }
                 let size = u32_at(b, pos + 4).unwrap_or(0) as usize;
+                let entry_end = pos + size;
+                let hbins = u32_at(b, pos + 16).unwrap_or(0);
                 let count = u32_at(b, pos + 20).unwrap_or(0) as usize;
                 let mut at = pos + 40 + 8 * count;
                 let mut pages = Vec::new();
                 for i in 0..count {
                     let offset = u32_at(b, pos + 40 + 8 * i).unwrap_or(0);
-                    let len = u32_at(b, pos + 44 + 8 * i).unwrap_or(0) as usize;
-                    let Some(page) = at.checked_add(len).and_then(|end| b.get(at..end)) else {
+                    let len = u32_at(b, pos + 44 + 8 * i).unwrap_or(0);
+                    let Some(end) = at.checked_add(len as usize) else {
                         break;
                     };
+                    if end > entry_end
+                        || offset
+                            .checked_add(len)
+                            .is_none_or(|page_end| page_end > hbins)
+                    {
+                        break;
+                    }
+                    let page = &b[at..end];
                     pages.push((offset, page.to_vec()));
-                    at += len;
+                    at = end;
                 }
-                out.push(LogEntry {
-                    log: log.name.clone(),
-                    sequence: Some(sequence),
-                    pages,
-                });
+                if pages.len() == count {
+                    out.push(LogEntry {
+                        log: log.name.clone(),
+                        sequence: Some(sequence),
+                        pages,
+                    });
+                }
                 pos += size;
             }
         } else if is_old_log(log, &mut Vec::new()) {
@@ -875,6 +887,10 @@ mod tests {
         rehash_entry(&mut first);
         let second = entry(11, 4096, &[(1024, page(0xB))]);
         let log = new_log("SYSTEM.LOG1", 10, &[first, second]);
+        let kept = entries(std::slice::from_ref(&log));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].sequence, Some(11));
+        assert_eq!(kept[0].pages, [(1024, page(0xB))]);
         let r = replay(primary(), &[log]);
         assert!(!r.recovered, "{:?}", r.messages);
         assert_eq!((at(&r.bytes, 512), at(&r.bytes, 1024)), (0, 0));
