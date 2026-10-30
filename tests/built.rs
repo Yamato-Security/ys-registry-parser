@@ -6,7 +6,7 @@
 use ys_registry_parser::ntuser::recent_docs;
 use ys_registry_parser::sam::accounts;
 use ys_registry_parser::software::{TaskAction, task_cache};
-use ys_registry_parser::{Data, Hive, Status, decode};
+use ys_registry_parser::{Data, Hive, RecoveredStatus, Source, Status, decode};
 
 /// 2022-02-08T21:03:52Z.
 const WHEN: u64 = 132_888_278_320_000_000;
@@ -891,4 +891,88 @@ fn a_sam_without_its_names_key_keeps_the_accounts() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].username.as_deref(), Some("alice"));
     assert_eq!(found[0].problems, Vec::<String>::new());
+}
+
+#[test]
+fn recovered_records_said_complete_or_partial() {
+    let mut b = Builder::new();
+    // a value's data cell with a key record past the data (its slack); its parent set below
+    let mut cell = b"data".to_vec();
+    cell.resize(8, 0);
+    cell.extend(nk("InSlack", 0, (0, NONE), (0, NONE), 0x20));
+    let data = b.put(&cell, false);
+    let blob = b.put(&vk("Blob", 3, 4, data), false);
+    let keep = b.key("Keep", 0, &[], &[blob], false);
+    let software = b.key("Software", 0, &[keep], &[], false);
+    // a deleted key under a key in use, and one under it (its parent deleted too)
+    let run = b.value("Run", 1, &utf16z(r"C:\evil.exe"), true);
+    let gone = b.key("Gone", software, &[], &[run], true);
+    b.key("Child", gone, &[], &[], true);
+    // its parent lost; its value list in use again
+    b.key("Orphan", 0x10, &[], &[], true);
+    let reused = b.value("Reused", 4, &[1, 0, 0, 0], false);
+    b.key("Reusing", software, &[], &[reused], true);
+    let root = b.root(&[software]);
+    let mut bytes = b.hive(root);
+    let at = bytes.windows(7).position(|w| w == b"InSlack").unwrap() - 0x4c;
+    bytes[at + 0x10..at + 0x14].copy_from_slice(&software.to_le_bytes());
+    // a key record past the hive bins
+    let mut remnant = vec![0u8; 8];
+    remnant.extend(nk("PastTheBins", software, (0, NONE), (0, NONE), 0x20));
+    bytes.extend(remnant);
+    let hive = Hive::from_bytes(bytes).unwrap();
+    assert!(hive.key(r"Software\Keep").is_some());
+
+    let found = hive.recover();
+    let keys: Vec<(&str, RecoveredStatus, Vec<Source>)> = found
+        .keys
+        .iter()
+        .map(|k| (k.path.as_str(), k.status, k.sources.clone()))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            (
+                r"Software\Gone",
+                RecoveredStatus::DeletedComplete,
+                vec![Source::FreeCell]
+            ),
+            (
+                r"Software\Gone\Child",
+                RecoveredStatus::DeletedComplete,
+                vec![Source::FreeCell]
+            ),
+            (
+                r"[unknown]\Orphan",
+                RecoveredStatus::DeletedPartial,
+                vec![Source::FreeCell]
+            ),
+            (
+                r"Software\Reusing",
+                RecoveredStatus::DeletedPartial,
+                vec![Source::FreeCell]
+            ),
+            (
+                r"Software\InSlack",
+                RecoveredStatus::DeletedComplete,
+                vec![Source::CellSlack]
+            ),
+            (
+                r"Software\PastTheBins",
+                RecoveredStatus::DeletedComplete,
+                vec![Source::RemnantData]
+            ),
+        ]
+    );
+    assert_eq!(
+        found.keys[0].values[0].status,
+        RecoveredStatus::DeletedComplete
+    );
+    assert_eq!(
+        found.keys[3].problems,
+        [format!("value 0x{reused:x} is in use again")]
+    );
+    assert_eq!(found.values, Vec::new());
+    assert_eq!(Source::CellSlack.name(), "cell_slack");
+    assert_eq!(RecoveredStatus::DeletedPartial.name(), "deleted_partial");
 }

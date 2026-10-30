@@ -38,6 +38,17 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   cell that is in use again is reported, not taken for the deleted record's. Deleted values no
   deleted key lists are kept apart: their key is unknown. In a replayed hive, `replayed` says
   which deleted records the logs wrote.
+- Recovery (`Hive::recover`): the deleted records of the free cells, and also those in the slack
+  of cells in use and in the data past the hive bins (at every even offset, as yarp's scanner
+  reads them), and what only the transaction logs kept: the keys and values the hive held before
+  their replay that it no longer holds, and those of each log entry, applied or older than the
+  hive, read in its pages over the hive as it is (`Source`). Each record is given once with every
+  place it was found and a status (`RecoveredStatus`): `deleted_complete` (its whole path and
+  every value and data), `deleted_partial` (a path with `[unknown]` parts, or a value list,
+  values or data lost to cells in use again), `residual_value_only` (a value no deleted key
+  lists), `transaction_log_recovered` (only the logs hold it; with `in_use`, an earlier version
+  of a key the hive has, with the values it held otherwise). A log entry's data is taken only
+  where the entry wrote its cells, as they were then.
 - `SYSTEM` hives (`system`): the control sets `Select` names and those the hive has
   (`ControlSets`), the computer's name (`computer_name`), and a control set's services
   (`services`): display name, description, image path, service DLL (`Parameters\ServiceDll`),
@@ -136,6 +147,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   11, Server 2012 R2 and 2022; 30 accounts): every `F` and `V` field the same as
   [dissect](https://github.com/fox-it/dissect.target)'s `user_F` and `user_V` structures give,
   and the account expiry and logon counts as regipy's `samparse`.
+- Recovery on regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
+  `UsrClass.dat` with their logs: the same deleted keys (each once) as yarp's scanner finds in
+  free cells, slack and the data past the hive bins, and the same value names and types but for
+  one record whose type no Windows value has; on those two dirty hives and the DFIR Artifact
+  Museum's Windows 11 `SYSTEM`, every key and value that yarp's replay removes or changes is
+  recovered from the hive before the replay.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
@@ -149,8 +166,8 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   and `UserDontShowInLogonUI`; random damage, and random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.
 
-Not yet: deleted records in the slack of cells in use, in the data past the hive bins, or in the
-transaction logs' older versions of cells; security descriptors (`sk` cells).
+Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose
+data cells the entry didn't write.
 
 ## Licence
 

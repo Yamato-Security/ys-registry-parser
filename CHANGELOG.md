@@ -30,3 +30,8 @@ First version. (@YamatoSecurity)
   strings (`user_v`, `UserV`), the password hint, the linked Microsoft account, whether the
   sign-in screen hides the account, and its `Names` entry, matched with it; `account_flag_names`.
   Password hashes are not read.
+- `Hive::recover` (`Recovered`, `RecoveredKey`, `RecoveredValue`, `RecoveredStatus`, `Source`):
+  deleted keys and values from free cells, the slack of cells in use and the data past the hive
+  bins, and what only the transaction logs kept (the hive before their replay, and each log
+  entry's pages), each once with every place it was found and whether it is complete, partial, a
+  value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.

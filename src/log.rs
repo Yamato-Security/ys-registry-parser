@@ -132,6 +132,91 @@ pub(crate) fn checksum(b: &[u8]) -> u32 {
     }
 }
 
+/// What a log held for the hive at one time: an entry's dirty pages (a new-format log's entry,
+/// or an old-format log's pages).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogEntry {
+    /// The log's name.
+    pub(crate) log: String,
+    /// The entry's sequence number (new-format logs).
+    pub(crate) sequence: Option<u32>,
+    /// The pages: their offsets in the hive bins, and their bytes.
+    pub(crate) pages: Vec<(u32, Vec<u8>)>,
+}
+
+/// Every entry of `files` whose hashes are right, whether the replay applied it or not (a log
+/// keeps older entries after the current ones), in the order of the logs and entries.
+pub(crate) fn entries(files: &[LogFile]) -> Vec<LogEntry> {
+    let mut out = Vec::new();
+    for log in files {
+        let b = &log.data;
+        if b.len() > LOG_BASE + 40 && b.get(0..4) == Some(b"regf") && u32_at(b, 28) == Some(6) {
+            let mut pos = LOG_BASE;
+            while pos + 40 <= b.len() {
+                let sequence = u32_at(b, pos + 12).unwrap_or(0);
+                if invalid_entry(b, pos, sequence).is_some() {
+                    pos += 512;
+                    continue;
+                }
+                let size = u32_at(b, pos + 4).unwrap_or(0) as usize;
+                let entry_end = pos + size;
+                let hbins = u32_at(b, pos + 16).unwrap_or(0);
+                let count = u32_at(b, pos + 20).unwrap_or(0) as usize;
+                let mut at = pos + 40 + 8 * count;
+                let mut pages = Vec::new();
+                for i in 0..count {
+                    let offset = u32_at(b, pos + 40 + 8 * i).unwrap_or(0);
+                    let len = u32_at(b, pos + 44 + 8 * i).unwrap_or(0);
+                    let Some(end) = at.checked_add(len as usize) else {
+                        break;
+                    };
+                    if end > entry_end
+                        || offset
+                            .checked_add(len)
+                            .is_none_or(|page_end| page_end > hbins)
+                    {
+                        break;
+                    }
+                    let page = &b[at..end];
+                    pages.push((offset, page.to_vec()));
+                    at = end;
+                }
+                if pages.len() == count {
+                    out.push(LogEntry {
+                        log: log.name.clone(),
+                        sequence: Some(sequence),
+                        pages,
+                    });
+                }
+                pos += size;
+            }
+        } else if is_old_log(log, &mut Vec::new()) {
+            let bb = BaseBlock::new(b, false);
+            let start = dirty_pages_start(bb.hive_bins_data_size);
+            let mut pages = Vec::new();
+            for bit in 0..(bb.hive_bins_data_size / 512) as usize {
+                let Some(byte) = b.get(LOG_BASE + 4 + bit / 8) else {
+                    break;
+                };
+                if (byte >> (bit % 8)) & 1 == 0 {
+                    continue;
+                }
+                let from = start + pages.len() * 512;
+                let Some(page) = b.get(from..from + 512) else {
+                    break;
+                };
+                pages.push(((bit * 512) as u32, page.to_vec()));
+            }
+            out.push(LogEntry {
+                log: log.name.clone(),
+                sequence: None,
+                pages,
+            });
+        }
+    }
+    out
+}
+
 pub(crate) struct Replayed {
     pub(crate) bytes: Vec<u8>,
     pub(crate) recovered: bool,
@@ -626,15 +711,14 @@ fn marvin32(data: &[u8], seed: u64) -> u64 {
     (u64::from(p1) << 32) | u64::from(p0)
 }
 
+/// Logs built for tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
-    use std::collections::HashSet;
-    use std::io::Read;
 
     /// A base block (`regf`) with these sequence numbers, file type and hive bins data size, and
     /// its checksum.
-    fn base_block(
+    pub(crate) fn base_block(
         len: usize,
         seq1: u32,
         seq2: u32,
@@ -657,7 +741,7 @@ mod tests {
     }
 
     /// A dirty primary (sequence numbers 10 and 9) with one empty hive bin.
-    fn primary() -> Vec<u8> {
+    pub(crate) fn primary() -> Vec<u8> {
         let mut p = base_block(BASE, 10, 9, 0, 4096, 100);
         let mut bin = vec![0u8; 4096];
         bin[..4].copy_from_slice(b"hbin");
@@ -667,7 +751,7 @@ mod tests {
     }
 
     /// A new-format log entry writing `pages` (offset in the hive bins, bytes), with its hashes.
-    fn entry(seq: u32, hbins: u32, pages: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    pub(crate) fn entry(seq: u32, hbins: u32, pages: &[(u32, Vec<u8>)]) -> Vec<u8> {
         let mut e = vec![0u8; 40];
         e[..4].copy_from_slice(b"HvLE");
         e[12..16].copy_from_slice(&seq.to_le_bytes());
@@ -690,14 +774,14 @@ mod tests {
         e
     }
 
-    fn rehash_entry(e: &mut [u8]) {
+    pub(crate) fn rehash_entry(e: &mut [u8]) {
         let h1 = marvin32(&e[40..], MARVIN_SEED);
         e[24..32].copy_from_slice(&h1.to_le_bytes());
         let h2 = marvin32(&e[..32], MARVIN_SEED);
         e[32..40].copy_from_slice(&h2.to_le_bytes());
     }
 
-    fn new_log(name: &str, first: u32, entries: &[Vec<u8>]) -> LogFile {
+    pub(crate) fn new_log(name: &str, first: u32, entries: &[Vec<u8>]) -> LogFile {
         let mut data = base_block(LOG_BASE, first, first, 6, 4096, 200);
         for e in entries {
             data.extend(e);
@@ -707,6 +791,15 @@ mod tests {
             data,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::io::Read;
+
+    use super::testing::{base_block, entry, new_log, primary, rehash_entry};
 
     fn page(fill: u8) -> Vec<u8> {
         vec![fill; 512]
@@ -794,6 +887,10 @@ mod tests {
         rehash_entry(&mut first);
         let second = entry(11, 4096, &[(1024, page(0xB))]);
         let log = new_log("SYSTEM.LOG1", 10, &[first, second]);
+        let kept = entries(std::slice::from_ref(&log));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].sequence, Some(11));
+        assert_eq!(kept[0].pages, [(1024, page(0xB))]);
         let r = replay(primary(), &[log]);
         assert!(!r.recovered, "{:?}", r.messages);
         assert_eq!((at(&r.bytes, 512), at(&r.bytes, 1024)), (0, 0));

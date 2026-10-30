@@ -109,29 +109,14 @@ impl Hive {
                 at += (4 + found).next_multiple_of(8);
             }
         }
-        let paths: HashMap<u32, String> = self
-            .walk()
-            .map(|entry| (entry.key.offset(), entry.path))
-            .collect();
+        let paths = self.paths();
         let deleted_keys: HashSet<u32> = keys.iter().copied().collect();
         let mut listed = HashSet::new();
         let keys: Vec<DeletedKey> = keys
             .into_iter()
             .filter_map(|offset| {
                 let nk = self.cell(offset)?;
-                let (path, path_complete) = self.deleted_path(offset, &paths, &deleted_keys);
-                let mut key = DeletedKey {
-                    offset,
-                    name: key_name(nk),
-                    last_written: u64_at(nk, 4).unwrap_or(0),
-                    path,
-                    path_complete,
-                    values: Vec::new(),
-                    problems: Vec::new(),
-                    replayed: self.replayed(offset),
-                };
-                self.deleted_values(nk, &mut key, &mut listed);
-                Some(key)
+                Some(self.deleted_key(nk, offset, &paths, &deleted_keys, &mut listed))
             })
             .collect();
         let values = values
@@ -142,17 +127,51 @@ impl Hive {
         Deleted { keys, values }
     }
 
-    /// The path of the deleted key at `offset`, from its parents, and whether all were found.
+    /// The path of each key in use, by its offset.
+    pub(crate) fn paths(&self) -> HashMap<u32, String> {
+        self.walk()
+            .map(|entry| (entry.key.offset(), entry.path))
+            .collect()
+    }
+
+    /// The deleted key whose record is `nk` (its cell at `offset`; for a record in slack or
+    /// remnant data, 4 bytes before it), with its path and values; the values read are added
+    /// to `listed`.
+    pub(crate) fn deleted_key(
+        &self,
+        nk: &[u8],
+        offset: u32,
+        paths: &HashMap<u32, String>,
+        deleted_keys: &HashSet<u32>,
+        listed: &mut HashSet<u32>,
+    ) -> DeletedKey {
+        let (path, path_complete) = self.deleted_path(nk, paths, deleted_keys);
+        let mut key = DeletedKey {
+            offset,
+            name: key_name(nk),
+            last_written: u64_at(nk, 4).unwrap_or(0),
+            path,
+            path_complete,
+            values: Vec::new(),
+            problems: Vec::new(),
+            replayed: self.replayed(offset),
+        };
+        self.deleted_values(nk, &mut key, listed);
+        key
+    }
+
+    /// The path of the deleted key whose record is `nk`, from its parents, and whether all were
+    /// found.
     fn deleted_path(
         &self,
-        offset: u32,
+        nk: &[u8],
         paths: &HashMap<u32, String>,
         deleted: &HashSet<u32>,
     ) -> (String, bool) {
         let mut names = Vec::new();
-        let mut at = offset;
         let mut seen = HashSet::new();
-        while let Some(nk) = self.cell(at) {
+        let mut record = Some(nk);
+        while let Some(nk) = record {
             names.push(key_name(nk));
             let parent = u32_at(nk, 0x10).unwrap_or(u32::MAX);
             if let Some(path) = paths.get(&parent) {
@@ -165,7 +184,7 @@ impl Hive {
             if !deleted.contains(&parent) || !seen.insert(parent) || names.len() > MAX_DEPTH {
                 break;
             }
-            at = parent;
+            record = self.cell(parent);
         }
         names.push("[unknown]".to_owned());
         names.reverse();
@@ -220,8 +239,13 @@ impl Hive {
 
     /// The deleted value at `offset`, when its cell holds a value record.
     fn deleted_value(&self, offset: u32) -> Option<DeletedValue> {
-        let vk = self
-            .cell(offset)
+        self.deleted_value_record(self.cell(offset)?, offset)
+    }
+
+    /// The deleted value whose record is `vk` (its cell at `offset`, or 4 bytes before it), when
+    /// it looks like one Windows writes.
+    pub(crate) fn deleted_value_record(&self, vk: &[u8], offset: u32) -> Option<DeletedValue> {
+        let vk = Some(vk)
             .filter(|vk| vk.get(..2) == Some(b"vk") && plausible_value(vk, self.bytes().len()))?;
         let read = read_data(self, vk, false);
         let replayed = self.replayed(offset) || read.cells.iter().any(|&c| self.replayed(c));
@@ -253,7 +277,7 @@ fn plausible_name(name: &str) -> bool {
 }
 
 /// Whether an `nk` record looks like one Windows writes.
-fn plausible_key(nk: &[u8]) -> bool {
+pub(crate) fn plausible_key(nk: &[u8]) -> bool {
     let len = usize::from(u16_at(nk, 0x48).unwrap_or(0));
     nk.len() >= NK_FIXED
         && len > 0
@@ -265,7 +289,7 @@ fn plausible_key(nk: &[u8]) -> bool {
 }
 
 /// Whether a `vk` record looks like one Windows writes, in a hive of `hive_len` bytes.
-fn plausible_value(vk: &[u8], hive_len: usize) -> bool {
+pub(crate) fn plausible_value(vk: &[u8], hive_len: usize) -> bool {
     let len = usize::from(u16_at(vk, 2).unwrap_or(0));
     let raw = u32_at(vk, 4).unwrap_or(0);
     let offset = u32_at(vk, 8).unwrap_or(u32::MAX);

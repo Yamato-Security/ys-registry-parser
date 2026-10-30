@@ -30,6 +30,7 @@ mod deleted;
 mod hive;
 mod log;
 pub mod ntuser;
+mod recover;
 pub mod sam;
 pub mod software;
 pub mod system;
@@ -40,6 +41,7 @@ pub use data::{Data, ValueType, decode, filetime};
 pub use deleted::{Deleted, DeletedKey, DeletedValue};
 pub use hive::{Error, Header, Hive, Key, KeyEntry, Status, Value, Walk};
 pub use log::{LogFile, Recovery, find_logs};
+pub use recover::{Recovered, RecoveredKey, RecoveredStatus, RecoveredValue, Source};
 
 /// This crate's version, for records of what parsed them.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
