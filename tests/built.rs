@@ -3,9 +3,12 @@
 //! and values with their parents in use, deleted or lost.
 #![allow(clippy::unwrap_used, clippy::cast_possible_wrap)]
 
-use ys_registry_parser::ntuser::recent_docs;
+use std::fmt::Write as _;
+
+use ys_registry_parser::ntuser::{classes_sid, recent_docs};
+use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
 use ys_registry_parser::sam::accounts;
-use ys_registry_parser::software::{TaskAction, task_cache};
+use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
 use ys_registry_parser::{Data, Hive, RecoveredStatus, Source, Status, decode};
 
 /// 2022-02-08T21:03:52Z.
@@ -85,9 +88,14 @@ impl Builder {
 
     /// The root key, with `subkeys`.
     fn root(&mut self, subkeys: &[u32]) -> u32 {
+        self.root_named("ROOT", subkeys)
+    }
+
+    /// The root key, named `name`, with `subkeys`.
+    fn root_named(&mut self, name: &str, subkeys: &[u32]) -> u32 {
         let list = self.lf(subkeys);
         self.put(
-            &nk("ROOT", NONE, (subkeys.len() as u32, list), (0, NONE), 0x2c),
+            &nk(name, NONE, (subkeys.len() as u32, list), (0, NONE), 0x2c),
             false,
         )
     }
@@ -975,4 +983,687 @@ fn recovered_records_said_complete_or_partial() {
     assert_eq!(found.values, Vec::new());
     assert_eq!(Source::CellSlack.name(), "cell_slack");
     assert_eq!(RecoveredStatus::DeletedPartial.name(), "deleted_partial");
+}
+
+/// Keys and values by their paths, for hives of deep keys.
+#[derive(Default)]
+struct Tree {
+    keys: Vec<(String, Tree)>,
+    values: Vec<(String, u32, Vec<u8>)>,
+}
+
+impl Tree {
+    /// The key at `path`, made when it isn't there.
+    fn at(&mut self, path: &str) -> &mut Tree {
+        let mut tree = self;
+        for part in path.split('\\') {
+            let i = if let Some(i) = tree.keys.iter().position(|(name, _)| name == part) {
+                i
+            } else {
+                tree.keys.push((part.to_owned(), Tree::default()));
+                tree.keys.len() - 1
+            };
+            tree = &mut tree.keys[i].1;
+        }
+        tree
+    }
+
+    /// Value `name` of the key at `path`.
+    fn set(&mut self, path: &str, name: &str, kind: u32, data: &[u8]) -> &mut Self {
+        self.at(path)
+            .values
+            .push((name.to_owned(), kind, data.to_vec()));
+        self
+    }
+
+    /// A `REG_SZ` value.
+    fn sz(&mut self, path: &str, name: &str, text: &str) -> &mut Self {
+        self.set(path, name, 1, &utf16z(text))
+    }
+
+    /// A `REG_MULTI_SZ` value.
+    fn multi(&mut self, path: &str, name: &str, items: &[&str]) -> &mut Self {
+        let mut data: Vec<u8> = items.iter().flat_map(|i| utf16z(i)).collect();
+        data.extend([0, 0]);
+        self.set(path, name, 7, &data)
+    }
+
+    /// A `REG_DWORD` value.
+    fn dword(&mut self, path: &str, name: &str, n: u32) -> &mut Self {
+        self.set(path, name, 4, &n.to_le_bytes())
+    }
+
+    fn build(&self, b: &mut Builder, name: &str) -> u32 {
+        let subkeys: Vec<u32> = self.keys.iter().map(|(n, t)| t.build(b, n)).collect();
+        let values: Vec<u32> = self
+            .values
+            .iter()
+            .map(|(n, kind, data)| b.value(n, *kind, data, false))
+            .collect();
+        b.key(name, 0, &subkeys, &values, false)
+    }
+
+    /// The hive, its root named `root`.
+    fn hive(&self, root: &str) -> Hive {
+        let mut b = Builder::new();
+        let subkeys: Vec<u32> = self.keys.iter().map(|(n, t)| t.build(&mut b, n)).collect();
+        let root = b.root_named(root, &subkeys);
+        Hive::from_bytes(b.hive(root)).unwrap()
+    }
+}
+
+/// `StartupApproved`'s 12 bytes: enabled, or disabled at `WHEN`.
+fn approval(enabled: bool) -> Vec<u8> {
+    let mut b = vec![0u8; 12];
+    if enabled {
+        b[0] = 2;
+    } else {
+        b[0] = 3;
+        b[4..].copy_from_slice(&WHEN.to_le_bytes());
+    }
+    b
+}
+
+/// Each record as `mechanism key\value = data | image | arguments`, with what else is set.
+fn lines(records: &[Autostart]) -> Vec<String> {
+    records
+        .iter()
+        .map(|r| {
+            let mut line = format!(
+                r"{} {}\{} = {} | {} | {}",
+                r.mechanism.name(),
+                r.key_path,
+                r.value_name,
+                r.data.as_deref().unwrap_or("-"),
+                r.image_path.as_deref().unwrap_or("-"),
+                r.arguments.as_deref().unwrap_or("-"),
+            );
+            if let Some(enabled) = r.enabled {
+                let _ = write!(line, " enabled={enabled}");
+            }
+            if let Some(at) = r.disabled_at {
+                let _ = write!(line, " disabled_at={at}");
+            }
+            if let Some(o) = r.overrides_machine {
+                let _ = write!(line, " overrides={o}");
+            }
+            if r.wow64 {
+                line.push_str(" wow64");
+            }
+            if let Some(d) = &r.details {
+                let _ = write!(line, " ({d})");
+            }
+            if r.data_raw.is_some() {
+                line.push_str(" raw");
+            }
+            for p in &r.problems {
+                let _ = write!(line, " [{p}]");
+            }
+            line
+        })
+        .collect()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn software_autostarts() {
+    let cv = r"Microsoft\Windows\CurrentVersion";
+    let nt = r"Microsoft\Windows NT\CurrentVersion";
+    let approved = format!(r"{cv}\Explorer\StartupApproved");
+    let mut t = Tree::default();
+    t.sz(
+        &format!(r"{cv}\Run"),
+        "Updater",
+        r#""C:\Program Files\Up\up.exe" /bg"#,
+    )
+    .sz(&format!(r"{cv}\Run"), "Off", r"C:\Tools\off.exe")
+    .sz(&format!(r"{cv}\Run"), "Empty", "")
+    .set(&format!(r"{cv}\Run"), "Bytes", 3, &[0x41, 0x42])
+    .sz(&format!(r"Wow6432Node\{cv}\Run"), "Tray", "tray.exe")
+    .sz(
+        &format!(r"{cv}\RunOnce\Setup"),
+        "Once",
+        r"C:\Tools\once.exe",
+    )
+    .sz(&format!(r"{cv}\RunOnceEx"), "Title", "Installing")
+    .sz(&format!(r"{cv}\RunOnceEx\0001"), "", "Section")
+    .sz(
+        &format!(r"{cv}\RunOnceEx\0001"),
+        "1",
+        r"||C:\Tools\a.dll|Go",
+    )
+    .sz(
+        &format!(r"{cv}\Policies\Explorer\Run"),
+        "1",
+        r"C:\Tools\policy.exe",
+    )
+    .set(&format!(r"{approved}\Run"), "Updater", 3, &approval(true))
+    .set(&format!(r"{approved}\Run"), "off", 3, &approval(false))
+    .set(&format!(r"{approved}\Run"), "Gone", 3, &approval(false))
+    .set(&format!(r"{approved}\Run32"), "Tray", 3, &[3, 0])
+    .set(
+        &format!(r"{approved}\StartupFolder"),
+        "notes.lnk",
+        3,
+        &approval(true),
+    )
+    .sz(
+        &format!(r"{nt}\Winlogon"),
+        "Userinit",
+        r"C:\Windows\system32\userinit.exe,C:\Tools\evil.exe,",
+    )
+    .sz(&format!(r"{nt}\Winlogon"), "Shell", "explorer.exe")
+    .sz(&format!(r"{nt}\Winlogon"), "Taskman", "")
+    .sz(
+        &format!(r"{nt}\Winlogon\Notify\pkg"),
+        "DLLName",
+        "notify.dll",
+    )
+    .sz(
+        &format!(r"{nt}\Windows"),
+        "AppInit_DLLs",
+        "a.dll,b.dll c.dll",
+    )
+    .dword(&format!(r"{nt}\Windows"), "LoadAppInit_DLLs", 1)
+    .sz(&format!(r"Wow6432Node\{nt}\Windows"), "AppInit_DLLs", "")
+    .sz(
+        &format!(r"{nt}\Image File Execution Options\sethc.exe"),
+        "Debugger",
+        r"C:\Windows\System32\cmd.exe",
+    )
+    .sz(
+        &format!(r"{nt}\Image File Execution Options\notepad.exe"),
+        "GlobalFlag",
+        "0x200",
+    )
+    .dword(
+        &format!(r"{nt}\Image File Execution Options\calc.exe"),
+        "GlobalFlag",
+        0x100,
+    )
+    .sz(
+        &format!(r"{nt}\Image File Execution Options\calc.exe"),
+        "VerifierDlls",
+        "v1.dll v2.dll",
+    )
+    .dword(
+        &format!(r"{nt}\Image File Execution Options\mspaint.exe"),
+        "UseFilter",
+        1,
+    )
+    .sz(
+        &format!(r"{nt}\Image File Execution Options\mspaint.exe\one"),
+        "FilterFullPath",
+        r"C:\Apps\mspaint.exe",
+    )
+    .sz(
+        &format!(r"{nt}\Image File Execution Options\mspaint.exe\one"),
+        "Debugger",
+        "dbg.exe",
+    )
+    .sz(
+        &format!(r"{nt}\SilentProcessExit\notepad.exe"),
+        "MonitorProcess",
+        r"C:\Tools\monitor.exe -q",
+    )
+    .dword(
+        &format!(r"{nt}\SilentProcessExit\notepad.exe"),
+        "ReportingMode",
+        1,
+    )
+    .sz(
+        &format!(r"{nt}\SilentProcessExit\write.exe"),
+        "MonitorProcess",
+        r"C:\Tools\monitor.exe",
+    )
+    .sz(
+        r"Microsoft\Active Setup\Installed Components\{0001}",
+        "",
+        "Component",
+    )
+    .sz(
+        r"Microsoft\Active Setup\Installed Components\{0001}",
+        "StubPath",
+        r"C:\Tools\stub.exe /user",
+    )
+    .dword(
+        r"Microsoft\Active Setup\Installed Components\{0001}",
+        "IsInstalled",
+        0,
+    )
+    .sz(
+        r"Microsoft\Active Setup\Installed Components\{0002}",
+        "StubPath",
+        "U",
+    )
+    .sz(
+        r"Microsoft\Active Setup\Installed Components\{0002}",
+        "ShellComponent",
+        "shell32.dll",
+    )
+    .sz(r"Microsoft\NetSh", "helper", "helper.dll")
+    .sz(
+        r"Microsoft\Command Processor",
+        "AutoRun",
+        r"C:\Tools\auto.bat",
+    )
+    .sz(
+        r"Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-21-1-2-3-1001",
+        "ProfileImagePath",
+        r"C:\Users\alice",
+    );
+    let hive = t.hive("ROOT");
+    let (records, problems) = persistence::software(&hive);
+    assert_eq!(problems, Vec::<String>::new());
+    let ifeo = r"Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
+    let setup = r"Microsoft\Active Setup\Installed Components";
+    assert_eq!(
+        lines(&records),
+        [
+            format!(
+                r#"run {cv}\Run\Updater = "C:\Program Files\Up\up.exe" /bg | C:\Program Files\Up\up.exe | /bg enabled=true"#
+            ),
+            format!(
+                r"run {cv}\Run\Off = C:\Tools\off.exe | C:\Tools\off.exe | - enabled=false disabled_at={WHEN}"
+            ),
+            format!(r"run {cv}\Run\Bytes = - | - | - raw [is REG_BINARY, not a string]"),
+            format!(r"run_once {cv}\RunOnce\Setup\Once = C:\Tools\once.exe | C:\Tools\once.exe | -"),
+            format!(r"run_once_ex {cv}\RunOnceEx\0001\1 = ||C:\Tools\a.dll|Go | - | -"),
+            format!(
+                r"policies_run {cv}\Policies\Explorer\Run\1 = C:\Tools\policy.exe | C:\Tools\policy.exe | -"
+            ),
+            format!(
+                r"run Wow6432Node\{cv}\Run\Tray = tray.exe | tray.exe | - wow64 [StartupApproved\Run32: 2 bytes, not 12]"
+            ),
+            format!(
+                r"run {approved}\Run\Gone = - | - | - enabled=false disabled_at={WHEN} (only in StartupApproved: the Run key has no value of this name)"
+            ),
+            format!(
+                r"startup_folder {approved}\StartupFolder\notes.lnk = - | - | - enabled=true (a file in the Startup folder)"
+            ),
+            format!(r"winlogon {nt}\Winlogon\Shell = explorer.exe | explorer.exe | -"),
+            format!(
+                r"winlogon {nt}\Winlogon\Userinit = C:\Windows\system32\userinit.exe | C:\Windows\system32\userinit.exe | - (one of the Userinit programs, comma-separated)"
+            ),
+            format!(
+                r"winlogon {nt}\Winlogon\Userinit = C:\Tools\evil.exe | C:\Tools\evil.exe | - (one of the Userinit programs, comma-separated)"
+            ),
+            format!(r"winlogon_notify {nt}\Winlogon\Notify\pkg\DLLName = notify.dll | notify.dll | -"),
+            format!(r"appinit_dlls {nt}\Windows\AppInit_DLLs = a.dll | a.dll | - enabled=true"),
+            format!(r"appinit_dlls {nt}\Windows\AppInit_DLLs = b.dll | b.dll | - enabled=true"),
+            format!(r"appinit_dlls {nt}\Windows\AppInit_DLLs = c.dll | c.dll | - enabled=true"),
+            format!(
+                r"ifeo_debugger {ifeo}\sethc.exe\Debugger = C:\Windows\System32\cmd.exe | C:\Windows\System32\cmd.exe | -"
+            ),
+            format!(r"ifeo_verifier_dlls {ifeo}\calc.exe\VerifierDlls = v1.dll | v1.dll | - enabled=true"),
+            format!(r"ifeo_verifier_dlls {ifeo}\calc.exe\VerifierDlls = v2.dll | v2.dll | - enabled=true"),
+            format!(
+                r"ifeo_debugger {ifeo}\mspaint.exe\one\Debugger = dbg.exe | dbg.exe | - enabled=true (for C:\Apps\mspaint.exe (FilterFullPath))"
+            ),
+            format!(
+                r"silent_process_exit {nt}\SilentProcessExit\notepad.exe\MonitorProcess = C:\Tools\monitor.exe -q | C:\Tools\monitor.exe | -q enabled=true (ReportingMode 1 (launch MonitorProcess))"
+            ),
+            format!(
+                r"silent_process_exit {nt}\SilentProcessExit\write.exe\MonitorProcess = C:\Tools\monitor.exe | C:\Tools\monitor.exe | - enabled=false (ReportingMode 0)"
+            ),
+            format!(
+                r"active_setup {setup}\{{0001}}\StubPath = C:\Tools\stub.exe /user | C:\Tools\stub.exe | /user enabled=false (Component)"
+            ),
+            format!(
+                r"active_setup {setup}\{{0002}}\StubPath = U | shell32.dll | U (StubPath is ShellComponent's argument)"
+            ),
+            r"netsh_helper Microsoft\NetSh\helper = helper.dll | helper.dll | -".to_owned(),
+            r"command_processor_autorun Microsoft\Command Processor\AutoRun = C:\Tools\auto.bat | C:\Tools\auto.bat | -".to_owned(),
+        ]
+    );
+    assert!(
+        records
+            .iter()
+            .all(|r| r.last_written == WHEN && !r.replayed)
+    );
+    assert_eq!(
+        profile_list(&hive),
+        [(
+            "S-1-5-21-1-2-3-1001".to_owned(),
+            r"C:\Users\alice".to_owned()
+        )]
+    );
+    assert_eq!(Mechanism::Winlogon.attack_technique(), Some("T1547.004"));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn system_autostarts() {
+    let manager = r"ControlSet001\Control\Session Manager";
+    let mut t = Tree::default();
+    t.dword("Select", "Current", 1)
+        .multi(
+            manager,
+            "BootExecute",
+            &["autocheck autochk *", r"C:\Tools\native.exe"],
+        )
+        .multi(
+            manager,
+            "PendingFileRenameOperations",
+            &[r"\??\C:\a.dll", r"!\??\C:\b.dll", r"\??\C:\c.tmp", ""],
+        )
+        .sz(&format!(r"{manager}\KnownDLLs"), "kernel32", "kernel32.dll")
+        .sz(
+            &format!(r"{manager}\KnownDLLs"),
+            "DllDirectory",
+            r"%SystemRoot%\system32",
+        )
+        .sz(
+            &format!(r"{manager}\AppCertDlls"),
+            "cert",
+            r"C:\Tools\cert.dll",
+        )
+        .sz(&format!(r"{manager}\Environment"), "COR_PROFILER", "{0001}")
+        .sz(
+            &format!(r"{manager}\Environment"),
+            "COR_PROFILER_PATH",
+            r"C:\Tools\p.dll",
+        )
+        .sz(&format!(r"{manager}\Environment"), "Path", r"C:\Windows")
+        .multi(
+            r"ControlSet001\Control\Lsa",
+            "Authentication Packages",
+            &["msv1_0", "auth"],
+        )
+        .multi(
+            r"ControlSet001\Control\Lsa",
+            "Notification Packages",
+            &["scecli"],
+        )
+        .multi(
+            r"ControlSet001\Control\Lsa\OSConfig",
+            "Security Packages",
+            &["kerberos"],
+        )
+        .sz(
+            r"ControlSet001\Control\SecurityProviders",
+            "SecurityProviders",
+            "credssp.dll, sp.dll",
+        )
+        .sz(
+            r"ControlSet001\Control\Print\Monitors\Port",
+            "Driver",
+            "port.dll",
+        )
+        .sz(
+            r"ControlSet001\Control\Print\Providers\Net",
+            "Name",
+            "net.dll",
+        )
+        .sz(
+            r"ControlSet001\Control\Print\Environments\Windows x64\Print Processors\proc",
+            "Driver",
+            "proc.dll",
+        )
+        .sz(
+            r"ControlSet001\Services\W32Time\TimeProviders\Ntp",
+            "DllName",
+            "w32time.dll",
+        )
+        .dword(
+            r"ControlSet001\Services\W32Time\TimeProviders\Ntp",
+            "Enabled",
+            0,
+        )
+        .multi(
+            r"ControlSet002\Control\Lsa",
+            "Authentication Packages",
+            &["other"],
+        );
+    let hive = t.hive("ROOT");
+    let (records, problems) = persistence::system(&hive, 1);
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        lines(&records),
+        [
+            format!(r"boot_execute {manager}\BootExecute = autocheck autochk * | autocheck | autochk *"),
+            format!(r"boot_execute {manager}\BootExecute = C:\Tools\native.exe | C:\Tools\native.exe | -"),
+            format!(
+                r"pending_file_rename {manager}\PendingFileRenameOperations = \??\C:\a.dll | \??\C:\a.dll | - (to be moved to !\??\C:\b.dll)"
+            ),
+            format!(
+                r"pending_file_rename {manager}\PendingFileRenameOperations = \??\C:\c.tmp | \??\C:\c.tmp | - (to be deleted)"
+            ),
+            format!(r"known_dlls {manager}\KnownDLLs\kernel32 = kernel32.dll | kernel32.dll | -"),
+            format!(r"appcert_dlls {manager}\AppCertDlls\cert = C:\Tools\cert.dll | C:\Tools\cert.dll | -"),
+            format!(r"dotnet_profiler {manager}\Environment\COR_PROFILER = {{0001}} | - | -"),
+            format!(
+                r"dotnet_profiler {manager}\Environment\COR_PROFILER_PATH = C:\Tools\p.dll | C:\Tools\p.dll | -"
+            ),
+            r"lsa_authentication_package ControlSet001\Control\Lsa\Authentication Packages = msv1_0 | - | -".to_owned(),
+            r"lsa_authentication_package ControlSet001\Control\Lsa\Authentication Packages = auth | - | -".to_owned(),
+            r"lsa_notification_package ControlSet001\Control\Lsa\Notification Packages = scecli | - | -".to_owned(),
+            r"lsa_security_package ControlSet001\Control\Lsa\OSConfig\Security Packages = kerberos | - | -".to_owned(),
+            r"security_provider ControlSet001\Control\SecurityProviders\SecurityProviders = credssp.dll | credssp.dll | -".to_owned(),
+            r"security_provider ControlSet001\Control\SecurityProviders\SecurityProviders = sp.dll | sp.dll | -".to_owned(),
+            r"print_monitor ControlSet001\Control\Print\Monitors\Port\Driver = port.dll | port.dll | -".to_owned(),
+            r"print_provider ControlSet001\Control\Print\Providers\Net\Name = net.dll | net.dll | -".to_owned(),
+            r"print_processor ControlSet001\Control\Print\Environments\Windows x64\Print Processors\proc\Driver = proc.dll | proc.dll | -".to_owned(),
+            r"time_provider ControlSet001\Services\W32Time\TimeProviders\Ntp\DllName = w32time.dll | w32time.dll | - enabled=false".to_owned(),
+        ]
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn user_autostarts() {
+    let mut machine = Tree::default();
+    machine
+        .sz(r"Classes\CLSID\{AAAA}", "", "Shell thing")
+        .sz(r"Classes\Wow6432Node\CLSID\{CCCC}", "", "32-bit thing")
+        .sz(r"Classes\exefile\shell\open\command", "", r#""%1" %*"#);
+    let machine = MachineClasses::read(&machine.hive("ROOT"));
+
+    let mut user = Tree::default();
+    user.sz(
+        r"Software\Microsoft\Windows\CurrentVersion\Run",
+        "Sync",
+        r"C:\Users\alice\sync.exe /background",
+    )
+    .sz(
+        r"Software\Microsoft\Windows NT\CurrentVersion\Windows",
+        "Load",
+        r"C:\Tools\load.exe",
+    )
+    .sz(
+        r"Software\Microsoft\Windows NT\CurrentVersion\Windows",
+        "Run",
+        "",
+    )
+    .sz(
+        "Environment",
+        "UserInitMprLogonScript",
+        r"C:\Tools\logon.bat",
+    )
+    .dword("Environment", "COR_ENABLE_PROFILING", 1)
+    .sz(
+        r"Control Panel\Desktop",
+        "SCRNSAVE.EXE",
+        r"C:\Tools\saver.scr",
+    )
+    .sz(r"Control Panel\Desktop", "ScreenSaveActive", "1")
+    .sz(
+        r"Software\Microsoft\Windows\CurrentVersion\PackagedAppXDebug\App_1.0_x64__abc",
+        "",
+        r"C:\Tools\debugger.exe",
+    )
+    .sz(
+        r"Software\Classes\ms-settings\shell\open\command",
+        "",
+        r"C:\Windows\System32\cmd.exe",
+    )
+    .sz(
+        r"Software\Classes\ms-settings\shell\open\command",
+        "DelegateExecute",
+        "",
+    );
+    let (records, problems) = persistence::ntuser(&user.hive("ROOT"), Some(&machine));
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        lines(&records),
+        [
+            r"run Software\Microsoft\Windows\CurrentVersion\Run\Sync = C:\Users\alice\sync.exe /background | C:\Users\alice\sync.exe | /background",
+            r"windows_load Software\Microsoft\Windows NT\CurrentVersion\Windows\Load = C:\Tools\load.exe | C:\Tools\load.exe | -",
+            r"logon_script Environment\UserInitMprLogonScript = C:\Tools\logon.bat | C:\Tools\logon.bat | -",
+            r"dotnet_profiler Environment\COR_ENABLE_PROFILING = 1 | - | -",
+            r"appx_debugger Software\Microsoft\Windows\CurrentVersion\PackagedAppXDebug\App_1.0_x64__abc\ = C:\Tools\debugger.exe | C:\Tools\debugger.exe | -",
+            r"screensaver Control Panel\Desktop\SCRNSAVE.EXE = C:\Tools\saver.scr | C:\Tools\saver.scr | - enabled=true",
+            r"uac_bypass_command Software\Classes\ms-settings\shell\open\command\ = C:\Windows\System32\cmd.exe | C:\Windows\System32\cmd.exe | - overrides=false (with a DelegateExecute value)",
+        ]
+    );
+
+    let mut classes = Tree::default();
+    classes
+        .sz(r"CLSID\{AAAA}", "", "Hijacked")
+        .sz(r"CLSID\{aaaa}\InprocServer32", "", r"C:\Users\alice\h.dll")
+        .sz(
+            r"CLSID\{BBBB}\LocalServer32",
+            "",
+            r#""C:\Users\alice\own.exe" -Embedding"#,
+        )
+        .sz(
+            r"Wow6432Node\CLSID\{AAAA}\InprocServer32",
+            "",
+            r"C:\x86\h.dll",
+        )
+        .sz(
+            r"Wow6432Node\CLSID\{CCCC}\InProcServer32",
+            "",
+            r"C:\x86\c.dll",
+        )
+        .sz(r"exefile\shell\open\command", "", r"C:\Tools\wrap.exe %1")
+        .sz(
+            r"ActivatableClasses\Package\App_1.0_x64__abc\DebugInformation\App.Class",
+            "DebugPath",
+            r"C:\Tools\appdebug.exe",
+        );
+    let hive = classes.hive("S-1-5-21-1-2-3-1001_Classes");
+    assert_eq!(classes_sid(&hive).as_deref(), Some("S-1-5-21-1-2-3-1001"));
+    let (records, problems) = persistence::usrclass(&hive, Some(&machine));
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        lines(&records),
+        [
+            r"com_server CLSID\{aaaa}\InprocServer32\ = C:\Users\alice\h.dll | C:\Users\alice\h.dll | - overrides=true",
+            r#"com_server CLSID\{BBBB}\LocalServer32\ = "C:\Users\alice\own.exe" -Embedding | C:\Users\alice\own.exe | -Embedding overrides=false"#,
+            r"com_server Wow6432Node\CLSID\{AAAA}\InprocServer32\ = C:\x86\h.dll | C:\x86\h.dll | - overrides=false wow64",
+            r"com_server Wow6432Node\CLSID\{CCCC}\InProcServer32\ = C:\x86\c.dll | C:\x86\c.dll | - overrides=true wow64",
+            r"file_association exefile\shell\open\command\ = C:\Tools\wrap.exe %1 | C:\Tools\wrap.exe | %1 overrides=true",
+            r"appx_debugger ActivatableClasses\Package\App_1.0_x64__abc\DebugInformation\App.Class\DebugPath = C:\Tools\appdebug.exe | C:\Tools\appdebug.exe | -",
+        ]
+    );
+    // without the machine's classes, nothing says what they override
+    let (records, _) = persistence::usrclass(&hive, None);
+    assert!(records.iter().all(|r| r.overrides_machine.is_none()));
+    assert_eq!(classes_sid(&user.hive("ROOT")), None);
+}
+
+/// A `SilentProcessExit` record: its program, whether it is enabled, its details and problems.
+type Row = (String, Option<bool>, Option<String>, Vec<String>);
+
+#[test]
+fn silent_process_exit_reporting_modes() {
+    // MonitorProcess starts with GlobalFlag's 0x200 and ReportingMode's 0x1 only: 0x2 asks for a
+    // dump, 0x4 for a notification
+    let nt = r"Microsoft\Windows NT\CurrentVersion";
+    let mut t = Tree::default();
+    for (program, mode) in [
+        ("m0.exe", Some(0)),
+        ("m1.exe", Some(1)),
+        ("m2.exe", Some(2)),
+        ("m4.exe", Some(4)),
+        ("m7.exe", Some(7)),
+        ("none.exe", None),
+        ("text.exe", None),
+        ("unflagged.exe", Some(7)),
+    ] {
+        if program != "unflagged.exe" {
+            t.dword(
+                &format!(r"{nt}\Image File Execution Options\{program}"),
+                "GlobalFlag",
+                0x200,
+            );
+        }
+        let key = format!(r"{nt}\SilentProcessExit\{program}");
+        t.sz(&key, "MonitorProcess", r"C:\Tools\monitor.exe");
+        if let Some(mode) = mode {
+            t.dword(&key, "ReportingMode", mode);
+        }
+    }
+    t.sz(
+        &format!(r"{nt}\SilentProcessExit\text.exe"),
+        "ReportingMode",
+        "1",
+    );
+    let (records, problems) = persistence::software(&t.hive("ROOT"));
+    assert_eq!(problems, Vec::<String>::new());
+    let found: Vec<Row> = records
+        .iter()
+        .map(|r| {
+            (
+                r.key_path.rsplit('\\').next().unwrap().to_owned(),
+                r.enabled,
+                r.details.clone(),
+                r.problems.clone(),
+            )
+        })
+        .collect();
+    let expected =
+        |program: &str, enabled: Option<bool>, details: Option<&str>, problems: &[&str]| {
+            (
+                program.to_owned(),
+                enabled,
+                details.map(str::to_owned),
+                problems.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>(),
+            )
+        };
+    assert_eq!(
+        found,
+        [
+            expected("m0.exe", Some(false), Some("ReportingMode 0"), &[]),
+            expected(
+                "m1.exe",
+                Some(true),
+                Some("ReportingMode 1 (launch MonitorProcess)"),
+                &[]
+            ),
+            expected(
+                "m2.exe",
+                Some(false),
+                Some("ReportingMode 2 (local dump)"),
+                &[]
+            ),
+            expected(
+                "m4.exe",
+                Some(false),
+                Some("ReportingMode 4 (notification)"),
+                &[]
+            ),
+            expected(
+                "m7.exe",
+                Some(true),
+                Some("ReportingMode 7 (launch MonitorProcess, local dump, notification)"),
+                &[]
+            ),
+            expected("none.exe", Some(false), Some("ReportingMode 0"), &[]),
+            // a mode that can't be read leaves it unknown
+            expected(
+                "text.exe",
+                None,
+                None,
+                &["ReportingMode: is REG_SZ, not REG_DWORD"]
+            ),
+            expected(
+                "unflagged.exe",
+                Some(false),
+                Some("ReportingMode 7 (launch MonitorProcess, local dump, notification)"),
+                &[]
+            ),
+        ]
+    );
 }

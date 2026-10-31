@@ -30,6 +30,7 @@ mod deleted;
 mod hive;
 mod log;
 pub mod ntuser;
+pub mod persistence;
 mod recover;
 pub mod sam;
 pub mod software;
