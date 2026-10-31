@@ -1,12 +1,20 @@
 //! `NTUSER.DAT` hives: Explorer's recent documents (`RecentDocs`, in the order of its
-//! `MRUListEx`), and the name of the profile a hive belongs to.
+//! `MRUListEx`), the programs and shortcuts a user started from Explorer (`UserAssist`), and the
+//! name of the profile a hive belongs to.
 //!
 //! A `RecentDocs` value is the item's name (UTF-16, up to its NUL), then a shell item list
 //! whose first item is the file entry of the shortcut Windows made in the `Recent` folder: an
 //! 8.3 or ANSI name, and in its `0xBEEF0004` extension block the long name. An `MRUListEx` is
 //! the values' numbers, 4 bytes each, the most recent first, ending with `0xFFFFFFFF`.
+//!
+//! `UserAssist` has a `{GUID}` key per kind of item (programs, shortcuts, …), each with its
+//! format's `Version` and a `Count` key: a value per item, its name in ROT13, a program's name
+//! starting with a known folder's GUID (`{1AC14E77-…}\cmd.exe`: `System32`). Version 5 (Windows 7
+//! and later) data is 72 bytes: a session number, the run count, the focus count and time (ms),
+//! and from offset `0x3C` the FILETIME of the last run. Version 3 (Windows 2000 to Vista) is 16
+//! bytes: a session number, the run count plus 5, and the FILETIME of the last run.
 
-use crate::bytes::{u16_at, u32_at, utf16_units};
+use crate::bytes::{u16_at, u32_at, u64_at, utf16_units};
 use crate::data::{Data, ValueType, decode};
 use crate::hive::{Hive, Key, Status, Value};
 use std::collections::HashSet;
@@ -19,6 +27,182 @@ const SHELL_FOLDERS: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer
 const MRU_END: u32 = u32::MAX;
 /// The signature of a file entry's extension block.
 const BEEF0004: u32 = 0xbeef_0004;
+/// Where Explorer keeps `UserAssist`, under the hive's root.
+pub const USER_ASSIST: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist";
+
+/// The kinds of `UserAssist` keys, by their GUIDs.
+const USER_ASSIST_KINDS: [(&str, &str); 4] = [
+    ("{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}", "executable"),
+    ("{F4E57C4B-2036-45F0-A9AB-443BCFE33D9F}", "shortcut"),
+    ("{75048700-EF1F-11D0-9888-006097DEACF9}", "active_desktop"),
+    ("{5E6AB780-7743-11CF-A12B-00AA004AE837}", "internet_toolbar"),
+];
+
+/// Known folders: their GUIDs (`KNOWNFOLDERID`) and default paths, as Microsoft documents them.
+const KNOWN_FOLDERS: [(&str, &str); 48] = [
+    (
+        "{0139D44E-6AFE-49F2-8690-3DAFCAE6FFB8}",
+        r"%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs",
+    ),
+    (
+        "{0762D272-C50A-4BB0-A382-697DCD729B80}",
+        r"%SystemDrive%\Users",
+    ),
+    (
+        "{1777F761-68AD-4D8A-87BD-30B759FA33DD}",
+        r"%USERPROFILE%\Favorites",
+    ),
+    (
+        "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}",
+        r"%USERPROFILE%\Videos",
+    ),
+    (
+        "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}",
+        r"%windir%\system32",
+    ),
+    ("{2400183A-6185-49FB-A2D8-4A392A602BA3}", r"%PUBLIC%\Videos"),
+    ("{3214FAB5-9757-4298-BB61-92A9DEAA44FF}", r"%PUBLIC%\Music"),
+    (
+        "{33E28130-4E1E-4676-835A-98395C3BC3BB}",
+        r"%USERPROFILE%\Pictures",
+    ),
+    (
+        "{374DE290-123F-4565-9164-39C4925E467B}",
+        r"%USERPROFILE%\Downloads",
+    ),
+    (
+        "{3D644C9B-1FB8-4F30-9B45-F670235F79C0}",
+        r"%PUBLIC%\Downloads",
+    ),
+    ("{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}", r"%APPDATA%"),
+    (
+        "{4BD8D571-6D19-48D3-BE97-422220080E43}",
+        r"%USERPROFILE%\Music",
+    ),
+    (
+        "{4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}",
+        r"%USERPROFILE%\Saved Games",
+    ),
+    (
+        "{52A4F021-7B75-48A9-9F6B-4B87A210BC8F}",
+        r"%APPDATA%\Microsoft\Internet Explorer\Quick Launch",
+    ),
+    (
+        "{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}",
+        r"%LOCALAPPDATA%\Programs",
+    ),
+    ("{5E6C858F-0E22-4760-9AFE-EA3317B67173}", r"%USERPROFILE%"),
+    (
+        "{625B53C3-AB48-4EC1-BA1F-A1EF4146FC19}",
+        r"%APPDATA%\Microsoft\Windows\Start Menu",
+    ),
+    (
+        "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}",
+        r"%ALLUSERSPROFILE%",
+    ),
+    (
+        "{6365D5A7-0F0D-45E5-87F6-0DA56B6A4F7D}",
+        r"%ProgramFiles%\Common Files",
+    ),
+    ("{6D809377-6AF0-444B-8957-A3773F02200E}", r"%ProgramFiles%"),
+    (
+        "{724EF170-A42D-4FEF-9F26-B60E846FBA4F}",
+        r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Administrative Tools",
+    ),
+    (
+        "{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}",
+        r"%ProgramFiles(x86)%",
+    ),
+    (
+        "{82A5EA35-D9CD-47C5-9629-E15D2F714E6E}",
+        r"%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\StartUp",
+    ),
+    (
+        "{8983036C-27C0-404B-8F08-102D10DCFD74}",
+        r"%APPDATA%\Microsoft\Windows\SendTo",
+    ),
+    (
+        "{8AD10C31-2ADB-4296-A8F7-E4701232C972}",
+        r"%windir%\Resources",
+    ),
+    ("{905E63B6-C1BF-494E-B29C-65B732D3D21A}", r"%ProgramFiles%"),
+    (
+        "{9E3995AB-1F9C-4F13-B827-48B24B6C7174}",
+        r"%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned",
+    ),
+    (
+        "{A4115719-D62E-491D-AA7C-E74B8BE3B067}",
+        r"%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu",
+    ),
+    (
+        "{A520A1A4-1780-4FF6-BD18-167343C5AF16}",
+        r"%USERPROFILE%\AppData\LocalLow",
+    ),
+    (
+        "{A52BBA46-E9E1-435F-B3D9-28DAA648C0F6}",
+        r"%USERPROFILE%\OneDrive",
+    ),
+    (
+        "{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}",
+        r"%APPDATA%\Microsoft\Windows\Start Menu\Programs",
+    ),
+    (
+        "{AE50C081-EBD2-438A-8655-8A092E34987A}",
+        r"%APPDATA%\Microsoft\Windows\Recent",
+    ),
+    (
+        "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+        r"%USERPROFILE%\Desktop",
+    ),
+    (
+        "{B97D20BB-F46A-4C97-BA10-5E3608430854}",
+        r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\StartUp",
+    ),
+    (
+        "{BCB5256F-79F6-4CEE-B725-DC34E402FD46}",
+        r"%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\ImplicitAppShortcuts",
+    ),
+    (
+        "{BCBD3057-CA5C-4622-B42D-BC56DB0AE516}",
+        r"%LOCALAPPDATA%\Programs\Common",
+    ),
+    (
+        "{BFB9D5E0-C6A9-404C-B2B2-AE6DB6AF4968}",
+        r"%USERPROFILE%\Links",
+    ),
+    (
+        "{C4AA340D-F20F-4863-AFEF-F87EF2E6BA25}",
+        r"%PUBLIC%\Desktop",
+    ),
+    (
+        "{D0384E7D-BAC3-4797-8F14-CBA229B392B5}",
+        r"%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Administrative Tools",
+    ),
+    (
+        "{D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}",
+        r"%windir%\SysWOW64",
+    ),
+    (
+        "{DE974D24-D9C6-4D3E-BF91-F4455120B917}",
+        r"%ProgramFiles(x86)%\Common Files",
+    ),
+    ("{DFDF76A2-C82A-4D63-906A-5644AC457385}", r"%PUBLIC%"),
+    (
+        "{ED4824AF-DCE4-45A8-81E2-FC7965083634}",
+        r"%PUBLIC%\Documents",
+    ),
+    ("{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}", r"%LOCALAPPDATA%"),
+    ("{F38BF404-1D43-42F2-9305-67DE0B28FC23}", r"%windir%"),
+    (
+        "{F7F1ED05-9F6D-47A2-AAAE-29D317C6F066}",
+        r"%ProgramFiles%\Common Files",
+    ),
+    ("{FD228CB7-AE11-4AE3-864C-16F3910AB8FE}", r"%windir%\Fonts"),
+    (
+        "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+        r"%USERPROFILE%\Documents",
+    ),
+];
 
 /// An `MRUListEx` value's bytes: the numbers of the values, most recent first, without the
 /// end marker.
@@ -403,6 +587,311 @@ pub fn classes_sid(hive: &Hive) -> Option<String> {
     .then(|| sid.to_owned())
 }
 
+/// The default path of the known folder `guid` (`{1AC14E77-…}`, in any case).
+#[must_use]
+pub fn known_folder_path(guid: &str) -> Option<&'static str> {
+    KNOWN_FOLDERS
+        .iter()
+        .find(|(g, _)| g.eq_ignore_ascii_case(guid))
+        .map(|(_, path)| *path)
+}
+
+/// `text` with its ASCII letters rotated by 13, as `UserAssist` writes its value names.
+#[must_use]
+pub fn rot13(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            'a'..='z' => char::from((c as u8 - b'a' + 13) % 26 + b'a'),
+            'A'..='Z' => char::from((c as u8 - b'A' + 13) % 26 + b'A'),
+            _ => c,
+        })
+        .collect()
+}
+
+/// The path a decoded `UserAssist` name gives: its known folder GUID replaced by the folder's
+/// default path, or a version 3 name's part after its `UEME_…:` prefix; `None` when it is no
+/// path (an app id like `Microsoft.Windows.Explorer`, `UEME_UISCUT`).
+#[must_use]
+pub fn user_assist_path(name: &str) -> Option<String> {
+    let path = if name.starts_with("UEME_") {
+        name.split_once(':')?.1.to_owned()
+    } else {
+        match name.split_once('\\') {
+            Some((first, rest)) => match known_folder_path(first) {
+                Some(folder) => format!(r"{folder}\{rest}"),
+                None => name.to_owned(),
+            },
+            None => known_folder_path(name).map_or_else(|| name.to_owned(), str::to_owned),
+        }
+    };
+    (path.contains('\\') || path.contains('%')).then_some(path)
+}
+
+/// A `UserAssist` value's data, decoded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UserAssistData {
+    /// 5 (72 bytes: Windows 7 and later) or 3 (16 bytes: Windows 2000 to Vista).
+    pub format: u32,
+    /// The session it was last written in.
+    pub session_id: u32,
+    /// The run count as stored: version 3 adds 5 (see [`UserAssistData::run_count`]).
+    pub stored_count: u32,
+    /// How many times it had the focus (version 5).
+    pub focus_count: Option<u32>,
+    /// How long it had the focus, in milliseconds (version 5).
+    pub focus_time_ms: Option<u32>,
+    /// When it last ran (FILETIME); `None` when 0.
+    pub last_run: Option<u64>,
+}
+
+impl UserAssistData {
+    /// How many times it ran.
+    ///
+    /// # Errors
+    /// When a version 3 count is under 5, where Windows starts it.
+    pub fn run_count(&self) -> Result<u32, String> {
+        if self.format == 3 {
+            self.stored_count.checked_sub(5).ok_or_else(|| {
+                format!(
+                    "version 3 run count {} is under 5, where Windows starts it",
+                    self.stored_count
+                )
+            })
+        } else {
+            Ok(self.stored_count)
+        }
+    }
+}
+
+/// A `UserAssist` value's bytes, decoded by their size.
+///
+/// # Errors
+/// When they are neither 72 (version 5) nor 16 (version 3) bytes.
+pub fn user_assist_data(bytes: &[u8]) -> Result<UserAssistData, String> {
+    let word = |at| u32_at(bytes, at).unwrap_or(0);
+    let time = |at| u64_at(bytes, at).filter(|&t| t != 0);
+    match bytes.len() {
+        72 => Ok(UserAssistData {
+            format: 5,
+            session_id: word(0),
+            stored_count: word(4),
+            focus_count: Some(word(8)),
+            focus_time_ms: Some(word(12)),
+            last_run: time(0x3c),
+        }),
+        16 => Ok(UserAssistData {
+            format: 3,
+            session_id: word(0),
+            stored_count: word(4),
+            focus_count: None,
+            focus_time_ms: None,
+            last_run: time(8),
+        }),
+        n => Err(format!(
+            "{n} bytes: neither 72 (version 5) nor 16 (version 3)"
+        )),
+    }
+}
+
+/// One item of `UserAssist`: a program or shortcut a user started from Explorer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserAssistEntry {
+    /// Its `{GUID}` key's name.
+    pub guid: String,
+    /// What the key holds: `executable`, `shortcut` (Windows 7 and later), `active_desktop`,
+    /// `internet_toolbar` (earlier), or `other`.
+    pub kind: &'static str,
+    /// The `{GUID}` key's `Version`.
+    pub version: Option<u32>,
+    /// The value's name as written (ROT13).
+    pub name_rot13: String,
+    /// The name decoded.
+    pub name: String,
+    /// The path it names ([`user_assist_path`]).
+    pub path: Option<String>,
+    /// The data's format: 5 or 3, by its size.
+    pub format: Option<u32>,
+    /// The session it was last written in.
+    pub session_id: Option<u32>,
+    /// How many times it ran.
+    pub run_count: Option<u32>,
+    /// How many times it had the focus.
+    pub focus_count: Option<u32>,
+    /// How long it had the focus, in milliseconds.
+    pub focus_time_ms: Option<u32>,
+    /// When it last ran (FILETIME).
+    pub last_run: Option<u64>,
+    /// The value's bytes, when they don't decode.
+    pub data_raw: Option<Vec<u8>>,
+    /// When its `Count` key was last written (FILETIME).
+    pub last_written: u64,
+    /// Whether the transaction logs' replay wrote its value or its `Count` key.
+    pub replayed: bool,
+    /// What couldn't be read, and what doesn't match.
+    pub problems: Vec<String>,
+}
+
+/// The items of `UserAssist` in `hive`, each `{GUID}` key's `Count` values in order, without the
+/// session entries (`UEME_CTLSESSION`, `UEME_CTLCUACount:ctor`); with them what keeps keys from
+/// being read. `None` when the hive has no `UserAssist` key.
+#[must_use]
+pub fn user_assist(hive: &Hive) -> Option<(Vec<UserAssistEntry>, Vec<String>)> {
+    let key = hive.key(USER_ASSIST)?;
+    let (guids, mut problems) = key.subkeys();
+    if user_assist_settings(hive).no_encrypt == Some(1) {
+        problems.push(
+            r"UserAssist\Settings NoEncrypt is 1: names written while it was set are not ROT13, and decode wrongly"
+                .to_owned(),
+        );
+    }
+    let mut entries = Vec::new();
+    for guid_key in &guids {
+        let guid = guid_key.name();
+        if guid.eq_ignore_ascii_case("Settings") {
+            continue;
+        }
+        let (values, why) = guid_key.values();
+        problems.extend(why.into_iter().map(|w| format!("{guid}: {w}")));
+        let version = match values
+            .iter()
+            .find(|v| v.name().eq_ignore_ascii_case("Version"))
+            .map(crate::system::number)
+        {
+            Some(Ok(n)) => Some(n),
+            Some(Err(why)) => {
+                problems.push(format!("{guid}: Version: {why}"));
+                None
+            }
+            None => None,
+        };
+        let (subkeys, why) = guid_key.subkeys();
+        problems.extend(why.into_iter().map(|w| format!("{guid}: {w}")));
+        let Some(count) = subkeys
+            .iter()
+            .find(|k| k.name().eq_ignore_ascii_case("Count"))
+        else {
+            continue;
+        };
+        let (values, why) = count.values();
+        problems.extend(why.into_iter().map(|w| format!(r"{guid}\Count: {w}")));
+        let kind = USER_ASSIST_KINDS
+            .iter()
+            .find(|(g, _)| g.eq_ignore_ascii_case(&guid))
+            .map_or("other", |(_, kind)| *kind);
+        for value in &values {
+            let name = rot13(&value.name());
+            if name.starts_with("UEME_CTL") {
+                continue;
+            }
+            entries.push(user_assist_entry(count, value, &guid, kind, version, name));
+        }
+    }
+    Some((entries, problems))
+}
+
+/// One `Count` value's item.
+fn user_assist_entry(
+    count: &Key,
+    value: &Value,
+    guid: &str,
+    kind: &'static str,
+    version: Option<u32>,
+    name: String,
+) -> UserAssistEntry {
+    let mut entry = UserAssistEntry {
+        guid: guid.to_owned(),
+        kind,
+        version,
+        name_rot13: value.name(),
+        path: user_assist_path(&name),
+        name,
+        last_written: count.last_written(),
+        replayed: count.status() == Status::Replayed || value.status() == Status::Replayed,
+        ..UserAssistEntry::default()
+    };
+    let (bytes, why) = value.read_data();
+    entry.problems.extend(why);
+    if value.value_type() != ValueType::Binary {
+        entry
+            .problems
+            .push(format!("is {}, not REG_BINARY", value.value_type().name()));
+    }
+    match user_assist_data(&bytes) {
+        Ok(data) => {
+            if let Some(v) = version.filter(|&v| v != data.format) {
+                entry.problems.push(format!(
+                    "{} bytes (version {}), but the key's Version is {v}",
+                    bytes.len(),
+                    data.format
+                ));
+            }
+            entry.format = Some(data.format);
+            entry.session_id = Some(data.session_id);
+            match data.run_count() {
+                Ok(n) => entry.run_count = Some(n),
+                Err(why) => entry.problems.push(why),
+            }
+            entry.focus_count = data.focus_count;
+            entry.focus_time_ms = data.focus_time_ms;
+            entry.last_run = data.last_run;
+        }
+        Err(why) => entry.problems.push(why),
+    }
+    if !entry.problems.is_empty() {
+        entry.data_raw = Some(bytes);
+    }
+    entry
+}
+
+/// The settings that turn `UserAssist` off or change how it is written.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UserAssistSettings {
+    /// `Explorer\Advanced` `Start_TrackProgs`: 0 turns tracking off.
+    pub start_track_progs: Option<u32>,
+    /// `Policies\Explorer` `NoInstrumentation`: 1 turns tracking off.
+    pub no_instrumentation: Option<u32>,
+    /// `UserAssist\Settings` `NoLog`: 1 turns tracking off.
+    pub no_log: Option<u32>,
+    /// `UserAssist\Settings` `NoEncrypt`: 1 writes names without ROT13.
+    pub no_encrypt: Option<u32>,
+}
+
+impl UserAssistSettings {
+    /// Why `UserAssist` isn't kept: each setting that turns it off.
+    #[must_use]
+    pub fn tracking_off(&self) -> Vec<&'static str> {
+        [
+            (
+                self.start_track_progs == Some(0),
+                r"Explorer\Advanced Start_TrackProgs is 0",
+            ),
+            (
+                self.no_instrumentation == Some(1),
+                r"Policies\Explorer NoInstrumentation is 1",
+            ),
+            (self.no_log == Some(1), r"UserAssist\Settings NoLog is 1"),
+        ]
+        .into_iter()
+        .filter_map(|(set, why)| set.then_some(why))
+        .collect()
+    }
+}
+
+/// The `UserAssist` settings of `hive` (numbers that aren't `REG_DWORD`s are left out).
+#[must_use]
+pub fn user_assist_settings(hive: &Hive) -> UserAssistSettings {
+    let current = r"Software\Microsoft\Windows\CurrentVersion";
+    let dword = |path: &str, name: &str| {
+        crate::system::number(&hive.key(&format!(r"{current}\{path}"))?.value(name)?).ok()
+    };
+    UserAssistSettings {
+        start_track_progs: dword(r"Explorer\Advanced", "Start_TrackProgs"),
+        no_instrumentation: dword(r"Policies\Explorer", "NoInstrumentation"),
+        no_log: dword(r"Explorer\UserAssist\Settings", "NoLog"),
+        no_encrypt: dword(r"Explorer\UserAssist\Settings", "NoEncrypt"),
+    }
+}
+
 /// The profile folder's name in a path under `Users` or `Documents and Settings`.
 fn profile_in(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('\\').collect();
@@ -606,6 +1095,88 @@ mod tests {
         assert_eq!(
             profile_in(r"C:\Windows\system32\config\systemprofile\Desktop"),
             None
+        );
+    }
+
+    #[test]
+    fn rot13_names_and_known_folders() {
+        assert_eq!(
+            rot13(r"{1NP14R77-02R7-4R5Q-O744-2RO1NR5198O7}\pzq.rkr"),
+            r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\cmd.exe"
+        );
+        assert_eq!(rot13(&rot13("UEME_CTLSESSION 1.0")), "UEME_CTLSESSION 1.0");
+        assert_eq!(
+            user_assist_path(r"{1ac14e77-02e7-4e5d-b744-2eb1ae5198b7}\cmd.exe").as_deref(),
+            Some(r"%windir%\system32\cmd.exe")
+        );
+        assert_eq!(
+            user_assist_path(r"{00000000-0000-0000-0000-000000000000}\a.exe").as_deref(),
+            Some(r"{00000000-0000-0000-0000-000000000000}\a.exe")
+        );
+        assert_eq!(
+            user_assist_path(r"C:\Tools\a.exe").as_deref(),
+            Some(r"C:\Tools\a.exe")
+        );
+        assert_eq!(
+            user_assist_path(r"UEME_RUNPATH:C:\WINDOWS\system32\notepad.exe").as_deref(),
+            Some(r"C:\WINDOWS\system32\notepad.exe")
+        );
+        assert_eq!(user_assist_path("UEME_UISCUT"), None);
+        assert_eq!(user_assist_path("Microsoft.Windows.Explorer"), None);
+        assert_eq!(
+            known_folder_path("{6D809377-6AF0-444B-8957-A3773F02200E}"),
+            Some("%ProgramFiles%")
+        );
+    }
+
+    #[test]
+    fn user_assist_data_of_both_versions() {
+        let mut v5 = [0u8; 72];
+        v5[..4].copy_from_slice(&3u32.to_le_bytes());
+        v5[4..8].copy_from_slice(&7u32.to_le_bytes());
+        v5[8..12].copy_from_slice(&9u32.to_le_bytes());
+        v5[12..16].copy_from_slice(&65_000u32.to_le_bytes());
+        v5[0x3c..0x44].copy_from_slice(&132_888_278_320_000_000u64.to_le_bytes());
+        let data = user_assist_data(&v5).unwrap_or_default();
+        assert_eq!(
+            (
+                data.format,
+                data.session_id,
+                data.run_count(),
+                data.focus_count,
+                data.focus_time_ms,
+                data.last_run
+            ),
+            (
+                5,
+                3,
+                Ok(7),
+                Some(9),
+                Some(65_000),
+                Some(132_888_278_320_000_000)
+            )
+        );
+        let mut v3 = [0u8; 16];
+        v3[4..8].copy_from_slice(&12u32.to_le_bytes());
+        let data = user_assist_data(&v3).unwrap_or_default();
+        // version 3 counts from 5; a time of 0 is none
+        assert_eq!(
+            (
+                data.format,
+                data.run_count(),
+                data.focus_count,
+                data.last_run
+            ),
+            (3, Ok(7), None, None)
+        );
+        v3[4..8].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            user_assist_data(&v3).unwrap_or_default().run_count(),
+            Err("version 3 run count 2 is under 5, where Windows starts it".to_owned())
+        );
+        assert_eq!(
+            user_assist_data(&v5[..20]),
+            Err("20 bytes: neither 72 (version 5) nor 16 (version 3)".to_owned())
         );
     }
 }

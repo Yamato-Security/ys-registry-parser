@@ -22,6 +22,11 @@ First version. (@YamatoSecurity)
 - `ntuser`: an `NTUSER.DAT` hive's recent documents (`recent_docs`, `RecentDocs`, `RecentDoc`) in
   their `MRUListEx` order (`mru_list_ex`), with each item's name and its shortcut's name
   (`recent_doc_data`), and the profile's name (`profile_name`).
+- `ntuser::user_assist` (`UserAssistEntry`): the programs and shortcuts a user started from
+  Explorer, with each item's name decoded from ROT13 (`rot13`), its path with known folders
+  resolved (`user_assist_path`, `known_folder_path`), and its run count, focus count and time and
+  last run (`user_assist_data`, `UserAssistData`: versions 5 and 3); `user_assist_settings`
+  (`UserAssistSettings`): what turns UserAssist off. (@YamatoSecurity)
 - `software`: a `SOFTWARE` hive's Task Scheduler cache (`task_cache`, `ScheduledTask`): each task
   from its `Tree` entry and `Tasks` key, its lists, whether its security descriptor is there,
   `Actions` decoded by their structure (`task_actions`, `TaskActions`, `TaskAction`: exec, COM

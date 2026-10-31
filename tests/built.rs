@@ -5,7 +5,9 @@
 
 use std::fmt::Write as _;
 
-use ys_registry_parser::ntuser::{classes_sid, recent_docs};
+use ys_registry_parser::ntuser::{
+    classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
+};
 use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
 use ys_registry_parser::sam::accounts;
 use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
@@ -1666,4 +1668,144 @@ fn silent_process_exit_reporting_modes() {
             ),
         ]
     );
+}
+
+/// `UserAssist` version 5 data: a run count, focus count and time, and the last run.
+fn ua5(count: u32, focus: u32, focus_ms: u32, last_run: u64) -> Vec<u8> {
+    let mut b = vec![0u8; 72];
+    b[4..8].copy_from_slice(&count.to_le_bytes());
+    b[8..12].copy_from_slice(&focus.to_le_bytes());
+    b[12..16].copy_from_slice(&focus_ms.to_le_bytes());
+    b[0x3c..0x44].copy_from_slice(&last_run.to_le_bytes());
+    b
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn user_assist_of_both_versions() {
+    let ua = r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist";
+    let programs = format!(r"{ua}\{{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}}");
+    let desktop = format!(r"{ua}\{{75048700-EF1F-11D0-9888-006097DEACF9}}");
+    let other = format!(r"{ua}\{{0D6D4F41-2994-4BA0-8FEF-620E43CD2812}}");
+    let mut v3 = vec![0u8; 16];
+    v3[4..8].copy_from_slice(&8u32.to_le_bytes());
+    v3[8..16].copy_from_slice(&WHEN.to_le_bytes());
+    let mut t = Tree::default();
+    t.dword(&programs, "Version", 5)
+        .set(
+            &format!(r"{programs}\Count"),
+            &rot13(r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\cmd.exe"),
+            3,
+            &ua5(4, 6, 61_000, WHEN),
+        )
+        .set(
+            &format!(r"{programs}\Count"),
+            &rot13("Microsoft.Windows.Explorer"),
+            3,
+            &ua5(0, 2, 900, 0),
+        )
+        .set(
+            &format!(r"{programs}\Count"),
+            &rot13("UEME_CTLSESSION"),
+            3,
+            &[0; 1612],
+        )
+        .set(
+            &format!(r"{programs}\Count"),
+            &rot13(r"C:\Tools\short.exe"),
+            3,
+            &[1, 2, 3],
+        )
+        .set(
+            &format!(r"{programs}\Count"),
+            &rot13(r"C:\Tools\old.exe"),
+            3,
+            &v3,
+        )
+        .dword(&desktop, "Version", 3)
+        .set(
+            &format!(r"{desktop}\Count"),
+            &rot13(r"UEME_RUNPATH:C:\WINDOWS\system32\notepad.exe"),
+            3,
+            &v3,
+        )
+        .set(
+            &format!(r"{desktop}\Count"),
+            &rot13("UEME_CTLCUACount:ctor"),
+            3,
+            &[0; 16],
+        )
+        .set(
+            &format!(r"{other}\Count"),
+            &rot13(r"C:\Tools\x.exe"),
+            3,
+            &ua5(1, 1, 1, 0),
+        )
+        .dword(&format!(r"{ua}\Settings"), "NoEncrypt", 1)
+        .dword(
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+            "Start_TrackProgs",
+            0,
+        );
+    let hive = t.hive("ROOT");
+    let (entries, problems) = user_assist(&hive).unwrap();
+    assert_eq!(
+        problems,
+        [
+            r"UserAssist\Settings NoEncrypt is 1: names written while it was set are not ROT13, and decode wrongly"
+        ]
+    );
+    let found: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            format!(
+                "{} {} {} | {} | {:?} {:?} {:?} {:?} {:?} {:?} {}{:?}",
+                e.kind,
+                e.version.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+                e.name,
+                e.path.as_deref().unwrap_or("-"),
+                e.format,
+                e.run_count,
+                e.focus_count,
+                e.focus_time_ms,
+                e.last_run,
+                e.session_id,
+                if e.data_raw.is_some() { "raw " } else { "" },
+                e.problems
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            format!(
+                r"executable 5 {{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\cmd.exe | %windir%\system32\cmd.exe | Some(5) Some(4) Some(6) Some(61000) Some({WHEN}) Some(0) []"
+            ),
+            "executable 5 Microsoft.Windows.Explorer | - | Some(5) Some(0) Some(2) Some(900) None Some(0) []".to_owned(),
+            r#"executable 5 C:\Tools\short.exe | C:\Tools\short.exe | None None None None None None raw ["3 bytes: neither 72 (version 5) nor 16 (version 3)"]"#.to_owned(),
+            format!(
+                r#"executable 5 C:\Tools\old.exe | C:\Tools\old.exe | Some(3) Some(3) None None Some({WHEN}) Some(0) raw ["16 bytes (version 3), but the key's Version is 5"]"#
+            ),
+            format!(
+                r"active_desktop 3 UEME_RUNPATH:C:\WINDOWS\system32\notepad.exe | C:\WINDOWS\system32\notepad.exe | Some(3) Some(3) None None Some({WHEN}) Some(0) []"
+            ),
+            r"other - C:\Tools\x.exe | C:\Tools\x.exe | Some(5) Some(1) Some(1) Some(1) None Some(0) []".to_owned(),
+        ]
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|e| e.last_written == WHEN && !e.replayed)
+    );
+    assert_eq!(
+        entries[0].name_rot13,
+        r"{1NP14R77-02R7-4R5Q-O744-2RO1NR5198O7}\pzq.rkr"
+    );
+    let settings = user_assist_settings(&hive);
+    assert_eq!(
+        settings.tracking_off(),
+        [r"Explorer\Advanced Start_TrackProgs is 0"]
+    );
+    // a hive without UserAssist
+    assert!(user_assist(&Tree::default().hive("ROOT")).is_none());
 }

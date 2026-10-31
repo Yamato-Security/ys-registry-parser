@@ -64,6 +64,14 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   list names but the key hasn't, and values the list doesn't name, are reported. `profile_name`
   gives the profile folder's name (`alice` for `C:\Users\alice`) from the shell folders' paths;
   `classes_sid` gives the SID a `UsrClass.dat` belongs to, from its root key's name.
+  `user_assist` gives the programs and shortcuts a user started from Explorer (`UserAssist`):
+  each `{GUID}` key's kind (`executable`, `shortcut`, …) and `Version`, each item's name decoded
+  from ROT13 (`rot13`), its path with a known folder's GUID replaced by the folder's default path
+  (`user_assist_path`, `known_folder_path`), and its data (`user_assist_data`: version 5's run
+  count, focus count, focus time and last run; version 3's run count, stored plus 5, and last
+  run), without the session entries. Data of another size keeps its bytes.
+  `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
+  `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
@@ -182,6 +190,10 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, the dirty ones with their logs; 593 items): the same order, names and shortcut names
   as a reader built on yarp and [libfwsi](https://github.com/libyal/libfwsi)'s shell item
   parser.
+- UserAssist on 12 public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's and the DFIR Artifact
+  Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
+  and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
+  duplicates and its rounding of times to the microsecond.
 - The Task Scheduler's cache on 7 public `SOFTWARE` hives (regipy's Windows 7 and the DFIR
   Artifact Museum's Windows 10, 11, Server 2012 R2 and Server 2022 ones, the dirty ones with
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
@@ -208,7 +220,10 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
   and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
-  (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile); recent
+  (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile,
+  UserAssist, and its dirty `NTUSER.DAT` with the items its logs add); UserAssist built with both
+  versions, a value of another size, a version that disagrees with the key's, an unknown GUID,
+  session entries and `NoEncrypt`; recent
   documents whose list and values don't add up; a task cache built with real Windows 11 `Actions`
   and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
   way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`); accounts
