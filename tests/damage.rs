@@ -5,7 +5,9 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
-use ys_registry_parser::ntuser::{classes_sid, profile_name, recent_docs};
+use ys_registry_parser::ntuser::{
+    classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
+};
 use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
@@ -64,6 +66,7 @@ fn read_all(data: Vec<u8>) {
         let _ = persistence::system(&hive, set);
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
+    let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
@@ -132,6 +135,7 @@ proptest! {
         bytes.extend(&rest);
         let _ = task_actions(&bytes);
         let _ = task_actions(&rest);
+        let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
     }
