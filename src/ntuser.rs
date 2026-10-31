@@ -15,7 +15,7 @@
 //! bytes: a session number, the run count plus 5, and the FILETIME of the last run.
 
 use crate::bytes::{u16_at, u32_at, u64_at, utf16_units};
-use crate::data::{Data, ValueType, decode};
+use crate::data::{Data, ValueType, decode, filetime};
 use crate::hive::{Hive, Key, Status, Value};
 use std::collections::HashSet;
 
@@ -644,7 +644,7 @@ pub struct UserAssistData {
     pub focus_count: Option<u32>,
     /// How long it had the focus, in milliseconds (version 5).
     pub focus_time_ms: Option<u32>,
-    /// When it last ran (FILETIME); `None` when 0.
+    /// When it last ran (FILETIME) as stored, which may be out of range; `None` when 0.
     pub last_run: Option<u64>,
 }
 
@@ -723,7 +723,7 @@ pub struct UserAssistEntry {
     pub focus_count: Option<u32>,
     /// How long it had the focus, in milliseconds.
     pub focus_time_ms: Option<u32>,
-    /// When it last ran (FILETIME).
+    /// When it last ran (FILETIME); `None` when 0, or past 9999 (a problem then says so).
     pub last_run: Option<u64>,
     /// The value's bytes, when they don't decode.
     pub data_raw: Option<Vec<u8>>,
@@ -737,17 +737,13 @@ pub struct UserAssistEntry {
 
 /// The items of `UserAssist` in `hive`, each `{GUID}` key's `Count` values in order, without the
 /// session entries (`UEME_CTLSESSION`, `UEME_CTLCUACount:ctor`); with them what keeps keys from
-/// being read. `None` when the hive has no `UserAssist` key.
+/// being read. `None` when the hive has no `UserAssist` key. With `UserAssist\Settings`
+/// `NoEncrypt` set, each item's problems say that its name may not be ROT13.
 #[must_use]
 pub fn user_assist(hive: &Hive) -> Option<(Vec<UserAssistEntry>, Vec<String>)> {
     let key = hive.key(USER_ASSIST)?;
     let (guids, mut problems) = key.subkeys();
-    if user_assist_settings(hive).no_encrypt == Some(1) {
-        problems.push(
-            r"UserAssist\Settings NoEncrypt is 1: names written while it was set are not ROT13, and decode wrongly"
-                .to_owned(),
-        );
-    }
+    let no_encrypt = user_assist_settings(hive).no_encrypt == Some(1);
     let mut entries = Vec::new();
     for guid_key in &guids {
         let guid = guid_key.name();
@@ -787,11 +783,18 @@ pub fn user_assist(hive: &Hive) -> Option<(Vec<UserAssistEntry>, Vec<String>)> {
             if name.starts_with("UEME_CTL") {
                 continue;
             }
-            entries.push(user_assist_entry(count, value, &guid, kind, version, name));
+            let mut entry = user_assist_entry(count, value, &guid, kind, version, name);
+            if no_encrypt {
+                entry.problems.push(NO_ENCRYPT.to_owned());
+            }
+            entries.push(entry);
         }
     }
     Some((entries, problems))
 }
+
+/// What `NoEncrypt` does to an item's name.
+const NO_ENCRYPT: &str = r"UserAssist\Settings NoEncrypt is 1: a name written while it was set is not ROT13, and decodes wrongly";
 
 /// One `Count` value's item.
 fn user_assist_entry(
@@ -837,7 +840,12 @@ fn user_assist_entry(
             }
             entry.focus_count = data.focus_count;
             entry.focus_time_ms = data.focus_time_ms;
-            entry.last_run = data.last_run;
+            match data.last_run {
+                Some(t) if filetime(t).is_none() => entry
+                    .problems
+                    .push(format!("last run FILETIME 0x{t:016x} is past 9999")),
+                time => entry.last_run = time,
+            }
         }
         Err(why) => entry.problems.push(why),
     }

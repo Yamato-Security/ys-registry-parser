@@ -1741,7 +1741,6 @@ fn user_assist_of_both_versions() {
             3,
             &ua5(1, 1, 1, 0),
         )
-        .dword(&format!(r"{ua}\Settings"), "NoEncrypt", 1)
         .dword(
             r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
             "Start_TrackProgs",
@@ -1749,12 +1748,7 @@ fn user_assist_of_both_versions() {
         );
     let hive = t.hive("ROOT");
     let (entries, problems) = user_assist(&hive).unwrap();
-    assert_eq!(
-        problems,
-        [
-            r"UserAssist\Settings NoEncrypt is 1: names written while it was set are not ROT13, and decode wrongly"
-        ]
-    );
+    assert_eq!(problems, Vec::<String>::new());
     let found: Vec<String> = entries
         .iter()
         .map(|e| {
@@ -1808,4 +1802,37 @@ fn user_assist_of_both_versions() {
     );
     // a hive without UserAssist
     assert!(user_assist(&Tree::default().hive("ROOT")).is_none());
+}
+
+#[test]
+fn user_assist_names_without_rot13_and_times_out_of_range() {
+    // NoEncrypt: every item says its name may not be ROT13; a last run past 9999 is no time, its
+    // bytes kept
+    let ua = r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist";
+    let count = format!(r"{ua}\{{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}}\Count");
+    let corrupt = ua5(1, 1, 1, u64::MAX);
+    let mut t = Tree::default();
+    t.set(&count, r"C:\Tools\payload.exe", 3, &ua5(2, 1, 10, WHEN))
+        .set(&count, &rot13(r"C:\Tools\corrupt.exe"), 3, &corrupt)
+        .dword(&format!(r"{ua}\Settings"), "NoEncrypt", 1);
+    let (entries, problems) = user_assist(&t.hive("ROOT")).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let no_encrypt = r"UserAssist\Settings NoEncrypt is 1: a name written while it was set is not ROT13, and decodes wrongly";
+    assert_eq!(entries[0].name, r"P:\Gbbyf\cnlybnq.rkr");
+    assert_eq!(entries[0].problems, [no_encrypt]);
+    // the data decodes: no bytes kept for it
+    assert_eq!(
+        (entries[0].last_run, &entries[0].data_raw),
+        (Some(WHEN), &None)
+    );
+    assert_eq!(entries[1].last_run, None);
+    assert_eq!(
+        entries[1].problems,
+        [
+            "last run FILETIME 0xffffffffffffffff is past 9999",
+            no_encrypt
+        ]
+    );
+    assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
+    assert_eq!(entries[1].run_count, Some(1));
 }

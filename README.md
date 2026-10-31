@@ -69,7 +69,8 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   from ROT13 (`rot13`), its path with a known folder's GUID replaced by the folder's default path
   (`user_assist_path`, `known_folder_path`), and its data (`user_assist_data`: version 5's run
   count, focus count, focus time and last run; version 3's run count, stored plus 5, and last
-  run), without the session entries. Data of another size keeps its bytes.
+  run), without the session entries. Data of another size, or a last run past 9999, keeps its
+  bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
