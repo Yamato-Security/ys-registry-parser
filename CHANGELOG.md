@@ -30,6 +30,18 @@ First version. (@YamatoSecurity)
   strings (`user_v`, `UserV`), the password hint, the linked Microsoft account, whether the
   sign-in screen hides the account, and its `Names` entry, matched with it; `account_flag_names`.
   Password hashes are not read.
+- `persistence`: autostart locations in `SOFTWARE` (`software`), `SYSTEM` (`system`),
+  `NTUSER.DAT` (`ntuser`) and `UsrClass.dat` (`usrclass`), one `Autostart` per program, DLL or
+  package, with its `Mechanism` and MITRE ATT&CK technique: `Run` keys with `StartupApproved`
+  (`startup_approved`), `Winlogon`, `AppInit_DLLs`, `AppCertDlls`, Image File Execution Options
+  and `SilentProcessExit`, `Session Manager` (`BootExecute`, `KnownDLLs`,
+  `PendingFileRenameOperations`), .NET profiler variables, LSA packages and security providers,
+  print monitors, providers and processors, netsh helpers, time providers, Active Setup,
+  `Command Processor` `AutoRun`, the screen saver, logon scripts, app debuggers, and a user's COM
+  servers and `shell\open\command`s, with whether they override the machine's (`MachineClasses`).
+  `command_line` splits a command line into its program and arguments. (@YamatoSecurity)
+- `software::profile_list` (each profile's SID and folder) and `ntuser::classes_sid` (the SID a
+  `UsrClass.dat` belongs to). (@YamatoSecurity)
 - `Hive::recover` (`Recovered`, `RecoveredKey`, `RecoveredValue`, `RecoveredStatus`, `Source`):
   deleted keys and values from free cells, the slack of cells in use and the data past the hive
   bins, and what only the transaction logs kept (the hive before their replay, and each log

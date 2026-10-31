@@ -5,9 +5,10 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
-use ys_registry_parser::ntuser::{profile_name, recent_docs};
+use ys_registry_parser::ntuser::{classes_sid, profile_name, recent_docs};
+use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
-use ys_registry_parser::software::{dynamic_info, task_actions, task_cache};
+use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, computer_name, services};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -60,9 +61,17 @@ fn read_all(data: Vec<u8>) {
     let _ = computer_name(&hive);
     for set in sets.present {
         let _ = services(&hive, set);
+        let _ = persistence::system(&hive, set);
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = accounts(&hive);
+    let machine = MachineClasses::read(&hive);
+    let _ = (persistence::software(&hive), profile_list(&hive));
+    let _ = persistence::ntuser(&hive, Some(&machine));
+    let _ = (
+        persistence::usrclass(&hive, Some(&machine)),
+        classes_sid(&hive),
+    );
     // recovery reads the hive several times over: on the smaller hives
     if hive.bytes().len() <= 4 << 20 {
         let _ = hive.recover();

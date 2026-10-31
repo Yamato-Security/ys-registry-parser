@@ -62,7 +62,8 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `MRUListEx` (`mru_list_ex`), its name, and the name of its shortcut in the `Recent` folder (the
   long name in the file entry shell item's `0xBEEF0004` block, else its short name); items the
   list names but the key hasn't, and values the list doesn't name, are reported. `profile_name`
-  gives the profile folder's name (`alice` for `C:\Users\alice`) from the shell folders' paths.
+  gives the profile folder's name (`alice` for `C:\Users\alice`) from the shell folders' paths;
+  `classes_sid` gives the SID a `UsrClass.dat` belongs to, from its root key's name.
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
@@ -72,7 +73,7 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   arguments, working directory),
   COM handler (class id, data), e-mail and message box action, as far as the bytes go;
   `dynamic_info` decodes `DynamicInfo` (last registered, last run, state, last result, last
-  successful run).
+  successful run). `profile_list` gives each profile's SID and folder from `ProfileList`.
 - `SAM` hives (`sam`): the local accounts (`accounts`), each from its key under
   `SAM\Domains\Account\Users`: `F` (`user_f`: last logon, password last set, account expiry,
   last failed logon, RID, account control flags, country code, code page, failed and total logon
@@ -81,6 +82,35 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   whether the sign-in screen hides it; its `Names` entry's RID and time (about when the account
   was made) are matched with it, and what disagrees is reported. `account_flag_names` names the
   flags. Password hashes are not read.
+- Autostart locations (`persistence`), one `Autostart` per program, DLL or package a value names
+  (a list gives one each), with its `Mechanism` (`name`, and `attack_technique`: its MITRE
+  ATT&CK technique, where one fits), key, value, data, program and arguments (`command_line`
+  splits a command line where that can be told), whether it is enabled, and the problems its
+  values have:
+  - `software`: `Run`, `RunOnce` (and `Setup`), `RunOnceEx`, `RunServices(Once)` and
+    `Policies\Explorer\Run`, with their `Wow6432Node` and Terminal Server install-mode copies;
+    `Explorer\StartupApproved` (`startup_approved`: whether the Task Manager disabled an entry,
+    and when), with the entries no `Run` value has and the Startup folder's files; `Winlogon`
+    (`Shell`, `Userinit` and the rest, each comma-separated program, and `Notify`); `AppInit_DLLs`
+    with `LoadAppInit_DLLs`; Image File Execution Options `Debugger` (with `UseFilter`'s
+    `FilterFullPath`) and `VerifierDlls`, and `SilentProcessExit`'s `MonitorProcess`, enabled as
+    `GlobalFlag` says; Active Setup `StubPath` (a `ShellComponent` DLL's argument on Windows
+    10+); netsh helpers; `Command Processor` `AutoRun`.
+  - `system`: `Session Manager`'s `BootExecute`, `SetupExecute` and the like,
+    `PendingFileRenameOperations` (each file and where it goes), `KnownDLLs`, `AppCertDlls` and the
+    .NET profiler's `Environment` variables; LSA authentication, security and notification
+    packages and `SecurityProviders`; print monitors, providers and processors; time providers
+    with `Enabled`.
+  - `ntuser`: the user's `Run` keys and `StartupApproved`, `Windows` `Load` and `Run`,
+    `Winlogon` `Shell`, `Environment` (`UserInitMprLogonScript`, the .NET profiler), the screen
+    saver with `ScreenSaveActive`, `PackagedAppXDebug`, `Command Processor` `AutoRun`, and the
+    classes under `Software\Classes` as in `UsrClass.dat`.
+  - `usrclass`: COM servers (`CLSID\*\InprocServer32`, `LocalServer32`, and `Wow6432Node`'s),
+    `shell\open\command` for program types (`exefile`, `batfile`, …) and for what auto-elevating
+    programs start (`ms-settings`, `mscfile`, `Folder`, …), and app debuggers
+    (`ActivatableClasses\…\DebugInformation`). With the machine's `MachineClasses` (read from
+    `SOFTWARE`), each says whether it overrides the machine's registration of the same class or
+    command.
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
@@ -110,6 +140,20 @@ let current = ControlSets::read(&system).current_or_first().unwrap_or(1);
 for service in services(&system, current).map(|s| s.0).unwrap_or_default() {
     let actions = service.failure_actions.map(|f| f.actions).unwrap_or_default();
     println!("{} {:?} {actions:?}", service.name, service.image_path);
+}
+
+// autostarts: SOFTWARE's, and a user's COM classes that override the machine's
+use ys_registry_parser::persistence::{self, MachineClasses};
+for autostart in persistence::software(&hive).0 {
+    println!("{} {}\\{} = {:?}", autostart.mechanism.name(), autostart.key_path,
+        autostart.value_name, autostart.data);
+}
+let (classes, _) = ys_registry_parser::open(std::path::Path::new("UsrClass.dat"))?;
+let machine = MachineClasses::read(&hive);
+for autostart in persistence::usrclass(&classes, Some(&machine)).0 {
+    if autostart.overrides_machine == Some(true) {
+        println!("overrides the machine's: {} = {:?}", autostart.key_path, autostart.image_path);
+    }
 }
 ```
 
@@ -153,6 +197,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   one record whose type no Windows value has; on those two dirty hives and the DFIR Artifact
   Museum's Windows 11 `SYSTEM`, every key and value that yarp's replay removes or changes is
   recovered from the hive before the replay.
+- Autostarts on 10 public `SOFTWARE` and `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's Windows 10 ones): the same `Run`, `RunOnce`,
+  `RunServices` and `Policies\Explorer\Run` values (27) as regipy's `software_plugin` and
+  `ntuser_persistence`, and the same (none) `AppInit_DLLs` and IFEO debuggers as its
+  `appinitdlls` and `image_file_execution_options`; on regipy's `SYSTEM`, the same LSA packages
+  as its `lsa_packages`.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
@@ -163,7 +213,11 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
   way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`); accounts
   whose `F`, `V` and `Names` disagree or are cut short, with a password hint, a Microsoft account
-  and `UserDontShowInLogonUI`; random damage, and random `Actions`, `F` and `V`.
+  and `UserDontShowInLogonUI`; autostarts in regipy's `SYSTEM`, `NTUSER.DAT` and `UsrClass.dat`,
+  and in built hives with one of each kind, `StartupApproved` entries enabled, disabled and
+  without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, an Active Setup
+  `ShellComponent`, and a user's COM classes and commands that do and don't override the
+  machine's; random damage, and random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose

@@ -389,6 +389,20 @@ pub fn profile_name(hive: &Hive) -> Option<String> {
         .or_else(|| values.iter().find_map(path))
 }
 
+/// The SID of the user a `UsrClass.dat` belongs to, from its root key's name
+/// (`S-1-5-21-…_Classes`, as Windows creates it).
+#[must_use]
+pub fn classes_sid(hive: &Hive) -> Option<String> {
+    let name = hive.root()?.name();
+    let cut = name.len().checked_sub("_Classes".len())?;
+    let (sid, suffix) = (name.get(..cut)?, name.get(cut..)?);
+    let digits = sid.strip_prefix("S-1-")?;
+    (suffix.eq_ignore_ascii_case("_Classes")
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit() || b == b'-'))
+    .then(|| sid.to_owned())
+}
+
 /// The profile folder's name in a path under `Users` or `Documents and Settings`.
 fn profile_in(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('\\').collect();

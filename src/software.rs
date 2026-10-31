@@ -27,6 +27,26 @@ pub const TASK_CACHE: &str = r"Microsoft\Windows NT\CurrentVersion\Schedule\Task
 /// The lists a task's `{GUID}` may be in, by the trigger that starts it.
 const LISTS: [&str; 4] = ["Boot", "Logon", "Plain", "Maintenance"];
 
+/// Where the profiles are listed, under the hive's root.
+pub const PROFILE_LIST: &str = r"Microsoft\Windows NT\CurrentVersion\ProfileList";
+
+/// The profiles `ProfileList` lists: each SID with its profile's folder (`ProfileImagePath`, as
+/// written: `C:\Users\alice`, `%systemroot%\system32\config\systemprofile`).
+#[must_use]
+pub fn profile_list(hive: &Hive) -> Vec<(String, String)> {
+    let Some(list) = hive.key(PROFILE_LIST) else {
+        return Vec::new();
+    };
+    list.subkeys()
+        .0
+        .iter()
+        .filter_map(|profile| {
+            let path = string(&profile.value("ProfileImagePath")?).0?;
+            Some((profile.name(), path))
+        })
+        .collect()
+}
+
 /// A task's `Actions` value, decoded.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskActions {
