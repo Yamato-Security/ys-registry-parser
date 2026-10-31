@@ -94,7 +94,7 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
     (`Shell`, `Userinit` and the rest, each comma-separated program, and `Notify`); `AppInit_DLLs`
     with `LoadAppInit_DLLs`; Image File Execution Options `Debugger` (with `UseFilter`'s
     `FilterFullPath`) and `VerifierDlls`, and `SilentProcessExit`'s `MonitorProcess`, enabled as
-    `GlobalFlag` says; Active Setup `StubPath` (a `ShellComponent` DLL's argument on Windows
+    `GlobalFlag` says (`MonitorProcess` also needs `ReportingMode`'s `0x1`); Active Setup `StubPath` (a `ShellComponent` DLL's argument on Windows
     10+); netsh helpers; `Command Processor` `AutoRun`.
   - `system`: `Session Manager`'s `BootExecute`, `SetupExecute` and the like,
     `PendingFileRenameOperations` (each file and where it goes), `KnownDLLs`, `AppCertDlls` and the
@@ -215,7 +215,8 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   whose `F`, `V` and `Names` disagree or are cut short, with a password hint, a Microsoft account
   and `UserDontShowInLogonUI`; autostarts in regipy's `SYSTEM`, `NTUSER.DAT` and `UsrClass.dat`,
   and in built hives with one of each kind, `StartupApproved` entries enabled, disabled and
-  without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, an Active Setup
+  without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
+  with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
   machine's; random damage, and random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.

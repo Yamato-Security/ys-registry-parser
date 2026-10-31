@@ -54,7 +54,8 @@ pub enum Mechanism {
     IfeoDebugger,
     /// `Image File Execution Options\*` `VerifierDlls`: loaded into the program.
     IfeoVerifierDlls,
-    /// `SilentProcessExit\*` `MonitorProcess`: runs when the program exits.
+    /// `SilentProcessExit\*` `MonitorProcess`: runs when the program exits, with `GlobalFlag`'s
+    /// `0x200` and `ReportingMode`'s `0x1`.
     SilentProcessExit,
     /// `Session Manager`'s `BootExecute`, `SetupExecute`, `Execute`, …: native programs at
     /// boot.
@@ -211,7 +212,8 @@ pub struct Autostart {
     /// More about it: what a `PendingFileRenameOperations` entry does, the COM class's name, ….
     pub details: Option<String>,
     /// Whether it is enabled, when something says: `StartupApproved`, `LoadAppInit_DLLs`,
-    /// `GlobalFlag`, `IsInstalled`, `Enabled`, `ScreenSaveActive`.
+    /// `GlobalFlag` (with `ReportingMode` for `MonitorProcess`), `IsInstalled`, `Enabled`,
+    /// `ScreenSaveActive`.
     pub enabled: Option<bool>,
     /// When `StartupApproved` says it was disabled (FILETIME).
     pub disabled_at: Option<u64>,
@@ -710,8 +712,13 @@ const USER_COMMANDS: [(&str, Mechanism); 17] = [
 
 /// `GlobalFlag`'s `FLG_APPLICATION_VERIFIER`: load `VerifierDlls`.
 const FLG_APPLICATION_VERIFIER: u32 = 0x100;
-/// `GlobalFlag`'s `FLG_MONITOR_SILENT_PROCESS_EXIT`: start `MonitorProcess`.
+/// `GlobalFlag`'s `FLG_MONITOR_SILENT_PROCESS_EXIT`: monitor the program's silent exit, as
+/// `SilentProcessExit\<program>` `ReportingMode` says.
 const FLG_MONITOR_SILENT_PROCESS_EXIT: u32 = 0x200;
+/// `ReportingMode`'s flags: start `MonitorProcess`, write a dump, show a notification.
+const LAUNCH_MONITORPROCESS: u32 = 0x1;
+const LOCAL_DUMP: u32 = 0x2;
+const NOTIFICATION: u32 = 0x4;
 
 /// The COM classes and `shell\…\command` keys the machine registers (`SOFTWARE\Classes`), to
 /// tell which of a user's override them.
@@ -1284,17 +1291,45 @@ fn ifeo(f: &mut Found, nt: &str, wow64: bool) {
             .next()
             .unwrap_or_default()
             .to_uppercase();
-        record.enabled = Some(
-            flags
-                .get(&program)
-                .is_some_and(|g| g & FLG_MONITOR_SILENT_PROCESS_EXIT != 0),
-        );
-        if let Some(mode) = find(&values, "ReportingMode") {
-            match number(mode) {
-                Ok(n) => record.details = Some(format!("ReportingMode {n}")),
-                Err(why) => record.problems.push(format!("ReportingMode: {why}")),
+        let monitored = flags
+            .get(&program)
+            .is_some_and(|g| g & FLG_MONITOR_SILENT_PROCESS_EXIT != 0);
+        // without ReportingMode, its default 0: nothing is launched
+        let mode = match find(&values, "ReportingMode").map(number) {
+            Some(Ok(n)) => Ok(n),
+            Some(Err(why)) => Err(why),
+            None => Ok(0),
+        };
+        match mode {
+            Ok(n) => {
+                record.enabled = Some(monitored && n & LAUNCH_MONITORPROCESS != 0);
+                record.details = Some(reporting_mode(n));
+            }
+            // whether MonitorProcess runs depends on the mode that can't be read
+            Err(why) if monitored => record.problems.push(format!("ReportingMode: {why}")),
+            Err(why) => {
+                record.enabled = Some(false);
+                record.problems.push(format!("ReportingMode: {why}"));
             }
         }
+    }
+}
+
+/// A `SilentProcessExit` `ReportingMode` with the names of its flags.
+fn reporting_mode(mode: u32) -> String {
+    let names: Vec<&str> = [
+        (LAUNCH_MONITORPROCESS, "launch MonitorProcess"),
+        (LOCAL_DUMP, "local dump"),
+        (NOTIFICATION, "notification"),
+    ]
+    .iter()
+    .filter(|(flag, _)| mode & flag != 0)
+    .map(|(_, name)| *name)
+    .collect();
+    if names.is_empty() {
+        format!("ReportingMode {mode}")
+    } else {
+        format!("ReportingMode {mode} ({})", names.join(", "))
     }
 }
 

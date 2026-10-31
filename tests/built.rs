@@ -1301,10 +1301,10 @@ fn software_autostarts() {
                 r"ifeo_debugger {ifeo}\mspaint.exe\one\Debugger = dbg.exe | dbg.exe | - enabled=true (for C:\Apps\mspaint.exe (FilterFullPath))"
             ),
             format!(
-                r"silent_process_exit {nt}\SilentProcessExit\notepad.exe\MonitorProcess = C:\Tools\monitor.exe -q | C:\Tools\monitor.exe | -q enabled=true (ReportingMode 1)"
+                r"silent_process_exit {nt}\SilentProcessExit\notepad.exe\MonitorProcess = C:\Tools\monitor.exe -q | C:\Tools\monitor.exe | -q enabled=true (ReportingMode 1 (launch MonitorProcess))"
             ),
             format!(
-                r"silent_process_exit {nt}\SilentProcessExit\write.exe\MonitorProcess = C:\Tools\monitor.exe | C:\Tools\monitor.exe | - enabled=false"
+                r"silent_process_exit {nt}\SilentProcessExit\write.exe\MonitorProcess = C:\Tools\monitor.exe | C:\Tools\monitor.exe | - enabled=false (ReportingMode 0)"
             ),
             format!(
                 r"active_setup {setup}\{{0001}}\StubPath = C:\Tools\stub.exe /user | C:\Tools\stub.exe | /user enabled=false (Component)"
@@ -1561,4 +1561,109 @@ fn user_autostarts() {
     let (records, _) = persistence::usrclass(&hive, None);
     assert!(records.iter().all(|r| r.overrides_machine.is_none()));
     assert_eq!(classes_sid(&user.hive("ROOT")), None);
+}
+
+/// A `SilentProcessExit` record: its program, whether it is enabled, its details and problems.
+type Row = (String, Option<bool>, Option<String>, Vec<String>);
+
+#[test]
+fn silent_process_exit_reporting_modes() {
+    // MonitorProcess starts with GlobalFlag's 0x200 and ReportingMode's 0x1 only: 0x2 asks for a
+    // dump, 0x4 for a notification
+    let nt = r"Microsoft\Windows NT\CurrentVersion";
+    let mut t = Tree::default();
+    for (program, mode) in [
+        ("m0.exe", Some(0)),
+        ("m1.exe", Some(1)),
+        ("m2.exe", Some(2)),
+        ("m4.exe", Some(4)),
+        ("m7.exe", Some(7)),
+        ("none.exe", None),
+        ("text.exe", None),
+        ("unflagged.exe", Some(7)),
+    ] {
+        if program != "unflagged.exe" {
+            t.dword(
+                &format!(r"{nt}\Image File Execution Options\{program}"),
+                "GlobalFlag",
+                0x200,
+            );
+        }
+        let key = format!(r"{nt}\SilentProcessExit\{program}");
+        t.sz(&key, "MonitorProcess", r"C:\Tools\monitor.exe");
+        if let Some(mode) = mode {
+            t.dword(&key, "ReportingMode", mode);
+        }
+    }
+    t.sz(
+        &format!(r"{nt}\SilentProcessExit\text.exe"),
+        "ReportingMode",
+        "1",
+    );
+    let (records, problems) = persistence::software(&t.hive("ROOT"));
+    assert_eq!(problems, Vec::<String>::new());
+    let found: Vec<Row> = records
+        .iter()
+        .map(|r| {
+            (
+                r.key_path.rsplit('\\').next().unwrap().to_owned(),
+                r.enabled,
+                r.details.clone(),
+                r.problems.clone(),
+            )
+        })
+        .collect();
+    let expected =
+        |program: &str, enabled: Option<bool>, details: Option<&str>, problems: &[&str]| {
+            (
+                program.to_owned(),
+                enabled,
+                details.map(str::to_owned),
+                problems.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>(),
+            )
+        };
+    assert_eq!(
+        found,
+        [
+            expected("m0.exe", Some(false), Some("ReportingMode 0"), &[]),
+            expected(
+                "m1.exe",
+                Some(true),
+                Some("ReportingMode 1 (launch MonitorProcess)"),
+                &[]
+            ),
+            expected(
+                "m2.exe",
+                Some(false),
+                Some("ReportingMode 2 (local dump)"),
+                &[]
+            ),
+            expected(
+                "m4.exe",
+                Some(false),
+                Some("ReportingMode 4 (notification)"),
+                &[]
+            ),
+            expected(
+                "m7.exe",
+                Some(true),
+                Some("ReportingMode 7 (launch MonitorProcess, local dump, notification)"),
+                &[]
+            ),
+            expected("none.exe", Some(false), Some("ReportingMode 0"), &[]),
+            // a mode that can't be read leaves it unknown
+            expected(
+                "text.exe",
+                None,
+                None,
+                &["ReportingMode: is REG_SZ, not REG_DWORD"]
+            ),
+            expected(
+                "unflagged.exe",
+                Some(false),
+                Some("ReportingMode 7 (launch MonitorProcess, local dump, notification)"),
+                &[]
+            ),
+        ]
+    );
 }
