@@ -610,9 +610,13 @@ pub fn rot13(text: &str) -> String {
 
 /// The path a decoded `UserAssist` name gives: its known folder GUID replaced by the folder's
 /// default path, or a version 3 name's part after its `UEME_…:` prefix; `None` when it is no
-/// path (an app id like `Microsoft.Windows.Explorer`, `UEME_UISCUT`).
+/// path (an app id like `Microsoft.Windows.Explorer`, `UEME_UISCUT`, a shell namespace item like
+/// `::{26EE0668-…}\…` for a Control Panel item).
 #[must_use]
 pub fn user_assist_path(name: &str) -> Option<String> {
+    if name.starts_with("::") {
+        return None;
+    }
     let path = if name.starts_with("UEME_") {
         name.split_once(':')?.1.to_owned()
     } else {
@@ -1123,6 +1127,12 @@ mod tests {
         );
         assert_eq!(user_assist_path("UEME_UISCUT"), None);
         assert_eq!(user_assist_path("Microsoft.Windows.Explorer"), None);
+        assert_eq!(
+            user_assist_path(
+                r"::{ED228FDF-9EA8-4870-83B1-96B02CFE0D52}\{00D8862B-6453-4957-A821-3D98D74C76BE}"
+            ),
+            None
+        );
         assert_eq!(
             known_folder_path("{6D809377-6AF0-444B-8957-A3773F02200E}"),
             Some("%ProgramFiles%")
