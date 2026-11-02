@@ -73,6 +73,13 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+  `mui_cache` gives the programs a user ran with the names Windows read from their version
+  resources (`MuiCache`), from `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell\MuiCache`,
+  Windows Vista and later) and `NTUSER.DAT` (`Software\Microsoft\Windows\ShellNoRoam\MUICache`,
+  Windows XP): one entry per program, its `<path>.FriendlyAppName` and `<path>.ApplicationCompany`
+  values joined (Windows 8 and later), or its `<path>` value (Windows XP and 7), without `LangID`
+  and the resource strings the shell cached (`@shell32.dll,-22019`, counted). A value that isn't
+  text that decodes cleanly keeps its bytes.
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
@@ -195,6 +202,11 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- MuiCache on 36 public `UsrClass.dat` and `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's, Windows XP to 11; 16 with MuiCache, 827 values): the
+  same programs, friendly names and companies as dissect.target's `muicache` and the same 197
+  resource strings left out; the same values as regipy reads but for 2 paths whose one-byte names
+  have a letter past ASCII (`Niðurhal`, `Startmenü`), which regipy decodes as `�`.
 - The Task Scheduler's cache on 7 public `SOFTWARE` hives (regipy's Windows 7 and the DFIR
   Artifact Museum's Windows 10, 11, Server 2012 R2 and Server 2022 ones, the dirty ones with
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
@@ -222,7 +234,10 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
   and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
   (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile,
-  UserAssist, and its dirty `NTUSER.DAT` with the items its logs add); UserAssist built with both
+  UserAssist, and its dirty `NTUSER.DAT` with the items its logs add), and its dirty
+  `UsrClass.dat`'s MuiCache with the programs its logs add; MuiCache built in the Windows 8, 7
+  and XP forms, with both forms of one program, names in another case, resource strings,
+  `LangID`, a value that isn't a string and one that isn't valid UTF-16; UserAssist built with both
   versions, a value of another size, a version that disagrees with the key's, an unknown GUID,
   session entries and `NoEncrypt`; recent
   documents whose list and values don't add up; a task cache built with real Windows 11 `Actions`

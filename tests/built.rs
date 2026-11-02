@@ -1836,3 +1836,87 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn mui_cache_in_each_form() {
+    use ys_registry_parser::ntuser::{MUI_CACHE, MUI_CACHE_XP, MuiCacheEntry, mui_cache};
+    let mut lossy = utf16z("Ac");
+    lossy[2..4].copy_from_slice(&0xd800u16.to_le_bytes());
+    let mut t = Tree::default();
+    t.set(MUI_CACHE, "LangID", 3, &[9, 4])
+        // Windows 8 and later: two values per program, joined in any case
+        .sz(MUI_CACHE, r"C:\Tools\a.exe.FriendlyAppName", "A tool")
+        .sz(MUI_CACHE, r"c:\tools\A.EXE.applicationcompany", "Acme")
+        // Windows 7: the path alone; its friendly name is already given, so another entry
+        .sz(MUI_CACHE, r"C:\Tools\a.exe", "A tool, older")
+        .set(
+            MUI_CACHE,
+            r"%ProgramFiles%\x.exe.FriendlyAppName",
+            2,
+            &utf16z("Expanded"),
+        )
+        .sz(MUI_CACHE, "@shell32.dll,-22019", "Calculator")
+        // damaged: not a string; not valid UTF-16
+        .set(
+            MUI_CACHE,
+            r"C:\Tools\bin.exe.FriendlyAppName",
+            3,
+            &[1, 2, 3],
+        )
+        .set(MUI_CACHE, r"C:\Tools\bin.exe.ApplicationCompany", 1, &lossy);
+    let cache = mui_cache(&t.hive("S-1-5-21-1-2-3-1001_Classes")).unwrap();
+    assert_eq!((cache.resource_strings, cache.problems.len()), (1, 0));
+    let entry = |path: &str, name: Option<&str>, company: Option<&str>| MuiCacheEntry {
+        key_path: MUI_CACHE,
+        key_last_written: WHEN,
+        path: path.to_owned(),
+        friendly_app_name: name.map(str::to_owned),
+        application_company: company.map(str::to_owned),
+        ..MuiCacheEntry::default()
+    };
+    let mut bin = entry(r"C:\Tools\bin.exe", None, Some("A\u{fffd}"));
+    bin.friendly_app_name_raw = Some(vec![1, 2, 3]);
+    bin.application_company_raw = Some(lossy.clone());
+    bin.problems = vec![
+        "FriendlyAppName: is REG_BINARY, not a string".to_owned(),
+        "ApplicationCompany: is not valid UTF-16: decoded lossily".to_owned(),
+    ];
+    assert_eq!(
+        cache.entries,
+        [
+            entry(r"C:\Tools\a.exe", Some("A tool"), Some("Acme")),
+            entry(r"C:\Tools\a.exe", Some("A tool, older"), None),
+            entry(r"%ProgramFiles%\x.exe", Some("Expanded"), None),
+            bin,
+        ]
+    );
+
+    // Windows XP: NTUSER.DAT's ShellNoRoam, with resource strings
+    let mut t = Tree::default();
+    t.set(MUI_CACHE_XP, "LangID", 3, &[9, 4])
+        .sz(MUI_CACHE_XP, "@xpsp1res.dll,-11004", "Outlook Express")
+        .sz(
+            MUI_CACHE_XP,
+            r"@C:\WINDOWS\system32\SHELL32.dll,-9216",
+            "My Computer",
+        )
+        .sz(MUI_CACHE_XP, r"C:\WINDOWS\system32\notepad.exe", "Notepad");
+    let cache = mui_cache(&t.hive("ROOT")).unwrap();
+    assert_eq!(cache.resource_strings, 2);
+    assert_eq!(
+        cache.entries,
+        [MuiCacheEntry {
+            key_path: MUI_CACHE_XP,
+            ..entry(r"C:\WINDOWS\system32\notepad.exe", Some("Notepad"), None)
+        }]
+    );
+
+    // an empty key; no key
+    let mut t = Tree::default();
+    t.at(MUI_CACHE);
+    assert_eq!(mui_cache(&t.hive("ROOT")).map(|c| c.entries.len()), Some(0));
+    let mut t = Tree::default();
+    t.dword(r"Software\Microsoft\Windows\ShellNoRoam", "x", 1);
+    assert_eq!(mui_cache(&t.hive("ROOT")), None);
+}

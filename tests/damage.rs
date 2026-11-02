@@ -6,7 +6,8 @@ use std::sync::OnceLock;
 
 use proptest::prelude::*;
 use ys_registry_parser::ntuser::{
-    classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
+    classes_sid, mui_cache, profile_name, recent_docs, user_assist, user_assist_data,
+    user_assist_settings,
 };
 use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
@@ -35,6 +36,12 @@ fn system() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// The UsrClass.dat hive, unpacked once.
+fn usrclass() -> &'static [u8] {
+    static USRCLASS: OnceLock<Vec<u8>> = OnceLock::new();
+    USRCLASS.get_or_init(|| fixture("UsrClass.dat"))
 }
 
 /// Flip bytes of `data` past its base block.
@@ -67,6 +74,7 @@ fn read_all(data: Vec<u8>) {
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
+    let _ = mui_cache(&hive);
     let _ = accounts(&hive);
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
@@ -106,6 +114,18 @@ proptest! {
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
     ) {
         read_all(damage(system().to_vec(), flips));
+    }
+
+    /// MuiCache's key and values damaged: read without a panic.
+    #[test]
+    fn a_damaged_mui_cache(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(usrclass().to_vec(), flips), &[])
+        {
+            let _ = mui_cache(&hive);
+        }
     }
 
     #[test]

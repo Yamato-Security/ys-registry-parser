@@ -52,3 +52,7 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `ntuser::mui_cache` (`MuiCache`, `MuiCacheEntry`, `MUI_CACHE`, `MUI_CACHE_XP`): the programs a
+  user ran with the names and companies Windows read from their version resources, from
+  `UsrClass.dat` (Vista and later) and `NTUSER.DAT` (XP), each program's values joined, without
+  `LangID` and the cached resource strings. (@YamatoSecurity)
