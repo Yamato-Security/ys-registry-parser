@@ -6041,3 +6041,29 @@ fn office_unknown_trust_flags_remain_unknown() {
     assert_eq!(rows[0].macros_enabled, None);
     assert!(rows[0].problems.iter().any(|p| p.contains("flags")));
 }
+
+#[test]
+fn office_numeric_policies_report_wrong_registry_types() {
+    use ys_registry_parser::office::office;
+    let mut t = Tree::default();
+    t.sz(
+        r"Software\Microsoft\Office\16.0\Word\Security",
+        "VBAWarnings",
+        "1",
+    );
+    t.sz(
+        r"Software\Microsoft\Office\16.0\Word\Security\Trusted Locations",
+        "AllowNetworkLocations",
+        "1",
+    );
+    let (rows, _) = office(&t.hive("ROOT")).unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert!(
+            row.problems
+                .iter()
+                .any(|p| p.contains("REG_SZ, not REG_DWORD"))
+        );
+        assert_eq!(row.data_raw, Some(utf16z("1")));
+    }
+}
