@@ -52,3 +52,8 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `app_history` (`AppTrace`, `App`): traces third-party tools leave in `NTUSER.DAT`
+  (`app_history::ntuser`): Sysinternals tools whose licence the user accepted (with when they
+  first ran), WinRAR's, 7-Zip's and WinZip's archive and folder history, OneDrive accounts and
+  their synced folders, Adobe Acrobat's and Reader's recent files and folders, and TeamViewer's and
+  CCleaner's values; list entries with their positions. (@YamatoSecurity)

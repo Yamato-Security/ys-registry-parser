@@ -6,5 +6,6 @@
 | `regipy/transactions_NTUSER.DAT.gz`, `transactions_ntuser.dat.log1.gz`, `transactions_ntuser.dat.log2.gz` | the same: a dirty `NTUSER.DAT` and its new-format logs | MIT, `regipy/LICENSE` |
 | `regipy/UsrClass.dat.gz`, `UsrClass.dat.LOG1.gz`, `UsrClass.dat.LOG2.gz` | the same: a dirty `UsrClass.dat` and its new-format logs | MIT, `regipy/LICENSE` |
 | `regipy/SYSTEM.gz` | the same: `SYSTEM.xz`, a 32-bit Windows 7 `SYSTEM` hive with two control sets (`Select\Current` 1, `LastKnownGood` 2) | MIT, `regipy/LICENSE` |
+| `museum/w10_apt_NTUSER.DAT.gz`, `w10_apt_ntuser.dat.LOG1.gz`, `w10_apt_ntuser.dat.LOG2.gz` | the [DFIR Artifact Museum](https://github.com/AndrewRathbun/DFIRArtifactMuseum)'s `Windows/Registry/Win10/APTSimulatorVM/APTSimulatorVM_RegistryHives.7z`: `TestUser`'s dirty `NTUSER.DAT` and its new-format logs, gzipped (byte-identical to the archive's), with the Sysinternals keys PsExec and Sysmon left | MIT, `museum/LICENSE` |
 
 `SECURITY` is dirty too, without logs. The other hives are clean.

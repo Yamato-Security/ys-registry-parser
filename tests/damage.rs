@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::app_history;
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
@@ -35,6 +36,22 @@ fn system() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// The DFIR Artifact Museum's Windows 10 user hive, with Sysinternals keys, unpacked once.
+fn ntuser_apt() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| {
+        let path = format!(
+            "{}/tests/fixtures/museum/w10_apt_NTUSER.DAT.gz",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut data = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_end(&mut data)
+            .unwrap();
+        data
+    })
 }
 
 /// Flip bytes of `data` past its base block.
@@ -68,6 +85,7 @@ fn read_all(data: Vec<u8>) {
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
+    let _ = app_history::ntuser(&hive);
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -106,6 +124,18 @@ proptest! {
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
     ) {
         read_all(damage(system().to_vec(), flips));
+    }
+
+    /// Third-party tools' keys and values damaged: read without a panic.
+    #[test]
+    fn damaged_app_history(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        for hive in [ntuser_apt(), ntuser()] {
+            if let Ok((hive, _)) = ys_registry_parser::Hive::open(damage(hive.to_vec(), flips.clone()), &[]) {
+                let _ = app_history::ntuser(&hive);
+            }
+        }
     }
 
     #[test]
