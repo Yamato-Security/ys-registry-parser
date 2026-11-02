@@ -10,6 +10,7 @@ use ys_registry_parser::ntuser::{
 };
 use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
+use ys_registry_parser::security_settings;
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, computer_name, services};
 
@@ -64,10 +65,15 @@ fn read_all(data: Vec<u8>) {
     for set in sets.present {
         let _ = services(&hive, set);
         let _ = persistence::system(&hive, set);
+        let _ = security_settings::system(&hive, set);
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
+    let _ = (
+        security_settings::software(&hive),
+        security_settings::ntuser(&hive),
+    );
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));

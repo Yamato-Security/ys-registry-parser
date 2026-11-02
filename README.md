@@ -73,6 +73,23 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+- Security settings (`security_settings`) in `SOFTWARE` (`software`), a `SYSTEM` control set
+  (`system`) and `NTUSER.DAT` (`ntuser`), one `Setting` per value found, with its `Area`
+  (`defender`, `uac`, `credentials`, `remote_access`, `network`, `powershell`, `evidence`), value,
+  what the value means, whether it weakens what current Windows does by default (`None` where
+  that doesn't apply), and whether it comes from a `Policies` key: Microsoft Defender
+  (`DisableAntiSpyware`, real-time protection, tamper protection, MAPS and samples, and each
+  exclusion of `Exclusions\Paths`, `Extensions`, `Processes`, `IpAddresses` and
+  `TemporaryPaths`, with their policy keys), UAC (`EnableLUA`, `ConsentPromptBehaviorAdmin`,
+  `LocalAccountTokenFilterPolicy`, `FilterAdministratorToken`), credentials (`WDigest`'s
+  `UseLogonCredential`, `Lsa`'s `RunAsPPL`, `LsaCfgFlags`, `DisableRestrictedAdmin`,
+  `LmCompatibilityLevel`), Remote Desktop (`fDenyTSConnections`, the port, Network Level
+  Authentication, and their policies), the firewall profiles' `EnableFirewall` (and policies) and
+  `SMB1`, PowerShell (execution policy, script block, module and transcription logging, each AMSI
+  provider with its DLL, the user's policies and Windows Script Host's `AmsiEnable`), and evidence
+  (`NtfsDisableLastAccessUpdate`, System Restore, each classic event log's `MaxSize`, and whether
+  25 event log channels that record attacks are on, with their sizes). A value of another type
+  keeps its bytes, and no meaning is guessed for it.
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
@@ -195,6 +212,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- Security settings on 24 public `SOFTWARE` and `SYSTEM` hives (regipy's, Plaso's, notatin's and
+  the DFIR Artifact Museum's, Windows 7 to 11 and Server 2012 R2 and 2022, every control set,
+  read without their logs): the same values as regipy's `windows_defender` (10), `uac_plugin`
+  (25), `wdigest` (1), `execution_policy` (2) and `disable_last_access` (18); every one of the
+  564 settings found has the value python-registry reads, but 4 on regipy's damaged `SYSTEM`,
+  where python-registry stops at the key and dissect.regf reads the same values.
 - The Task Scheduler's cache on 7 public `SOFTWARE` hives (regipy's Windows 7 and the DFIR
   Artifact Museum's Windows 10, 11, Server 2012 R2 and Server 2022 ones, the dirty ones with
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
@@ -234,7 +257,11 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
-  machine's; random damage, and random `Actions`, `F` and `V`.
+  machine's; security settings on regipy's `SYSTEM` (`WDigest` keeping passwords, Remote Desktop
+  without Network Level Authentication, 4 MiB event logs, both control sets) and in built hives
+  with settings weakened and at their defaults, an exclusion of each kind, AMSI providers with and
+  without a COM server, channels on and off by default, a number written as a string and one too
+  large; random damage, and random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose

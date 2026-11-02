@@ -52,3 +52,10 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `security_settings`: the security settings attackers change, in `SOFTWARE` (`software`), a
+  `SYSTEM` control set (`system`) and `NTUSER.DAT` (`ntuser`): one `Setting` per value with its
+  `Area`, value, meaning, whether it weakens the default and whether it comes from a `Policies`
+  key; Microsoft Defender (with each exclusion), UAC, `WDigest`, LSA protection, Credential Guard,
+  Restricted Admin, NTLM, Remote Desktop, the firewall, SMBv1, PowerShell (execution policy,
+  logging, AMSI providers), last access times, System Restore and event log sizes and channels.
+  (@YamatoSecurity)

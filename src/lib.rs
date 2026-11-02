@@ -33,6 +33,7 @@ pub mod ntuser;
 pub mod persistence;
 mod recover;
 pub mod sam;
+pub mod security_settings;
 pub mod software;
 pub mod system;
 
