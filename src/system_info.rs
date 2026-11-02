@@ -42,8 +42,6 @@ pub const CURRENT_VERSION: &str = r"Microsoft\Windows NT\CurrentVersion";
 const PROFILE_LIST: &str = r"Microsoft\Windows NT\CurrentVersion\ProfileList";
 /// Where `SOFTWARE` keeps the user who last signed in.
 const LOGON_UI: &str = r"Microsoft\Windows\CurrentVersion\Authentication\LogonUI";
-/// The key whose `V` ends with the computer's SID.
-const ACCOUNT_DOMAIN: &str = r"SAM\Domains\Account";
 /// The start of the names of the keys `Setup` keeps for each earlier Windows version.
 const SOURCE_OS: &str = "Source OS";
 
@@ -138,6 +136,9 @@ impl<'h> Fields<'h> {
     fn split_filetime(&mut self, name: &str) -> Option<u64> {
         let high = self.dword(&format!("{name}High"));
         let low = self.dword(&format!("{name}Low"));
+        if high.is_some() != low.is_some() {
+            self.problem(name, "only one FILETIME half is present");
+        }
         Some((u64::from(high?) << 32) | u64::from(low?)).filter(|&t| t != 0)
     }
 
@@ -432,8 +433,16 @@ fn updated_on(name: &str) -> Option<String> {
     };
     let [month, day, year] = <[u32; 3]>::try_from(numbers(date, '/')?).ok()?;
     let [hour, minute, second] = <[u32; 3]>::try_from(numbers(time, ':')?).ok()?;
+    let leap_year =
+        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let max_day = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => 31,
+    };
     ((1..=12).contains(&month)
-        && (1..=31).contains(&day)
+        && (1..=max_day).contains(&day)
         && hour < 24
         && minute < 60
         && second < 61)
@@ -722,9 +731,7 @@ pub fn sid(bytes: &[u8]) -> Option<String> {
 /// isn't there, or those bytes aren't a SID of that form.
 #[must_use]
 pub fn machine_sid(sam: &Hive) -> Option<String> {
-    let bytes = sam.key(ACCOUNT_DOMAIN)?.value("V")?.data().ok()?;
-    let tail = bytes.get(bytes.len().checked_sub(24)?..)?;
-    sid(tail).filter(|s| s.starts_with("S-1-5-21-"))
+    crate::sam::machine_sid(sam)
 }
 
 /// The domains a `SECURITY` hive's LSA policy names. A key the hive hasn't, or whose value is
@@ -767,6 +774,12 @@ fn unicode_string(bytes: &[u8]) -> Result<String, String> {
         ));
     };
     let start = offset as usize;
+    let maximum = u16_at(bytes, 2).unwrap_or(0);
+    if length != 0 && (start < 8 || !start.is_multiple_of(2) || length > maximum) {
+        return Err(format!(
+            "invalid UNICODE_STRING: length {length}, maximum {maximum}, offset {offset}"
+        ));
+    }
     let text = start
         .checked_add(usize::from(length))
         .and_then(|end| bytes.get(start..end))
@@ -875,6 +888,33 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_strings_reject_header_offsets_and_inconsistent_lengths() {
+        for bytes in [
+            vec![2, 0, 2, 0, 0, 0, 0, 0, b'A', 0],
+            vec![2, 0, 0, 0, 8, 0, 0, 0, b'A', 0],
+            vec![2, 0, 2, 0, 9, 0, 0, 0, 0, b'A', 0],
+        ] {
+            assert!(unicode_string(&bytes).is_err(), "{bytes:?}");
+        }
+        assert_eq!(unicode_string(&[0; 8]), Ok(String::new()));
+    }
+
+    #[test]
+    fn source_os_dates_reject_impossible_calendar_days() {
+        for name in [
+            "Source OS (Updated on 2/30/2024 00:00:00)",
+            "Source OS (Updated on 4/31/2024 00:00:00)",
+            "Source OS (Updated on 2/29/1900 00:00:00)",
+        ] {
+            assert_eq!(updated_on(name), None, "{name}");
+        }
+        assert_eq!(
+            updated_on("Source OS (Updated on 2/29/2000 00:00:00)").as_deref(),
+            Some("2000-02-29T00:00:00")
+        );
+    }
 
     #[test]
     fn transition_dates() {
