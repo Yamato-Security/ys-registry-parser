@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::bytes::{i32_at, name, u16_at, u32_at, u64_at};
+use crate::bytes::{i32_at, name, u16_at, u32_at, u64_at, upcase_name};
 use crate::data::ValueType;
 use crate::log::{self, BASE, HBIN_ALIGNMENT, LogEntry, LogFile, Recovery};
 
@@ -587,11 +587,11 @@ impl<'h> Key<'h> {
     /// The subkey named `name`, in any case.
     #[must_use]
     pub fn subkey(&self, name: &str) -> Option<Key<'h>> {
-        let wanted = name.to_uppercase();
+        let wanted = upcase_name(name);
         self.subkeys()
             .0
             .into_iter()
-            .find(|k| k.name().to_uppercase() == wanted)
+            .find(|k| upcase_name(&k.name()) == wanted)
     }
 
     /// Its values that can be read, each once, and what keeps the others from being read.
@@ -635,11 +635,11 @@ impl<'h> Key<'h> {
     /// The value named `name`, in any case (`""`: the default value).
     #[must_use]
     pub fn value(&self, name: &str) -> Option<Value<'h>> {
-        let wanted = name.to_uppercase();
+        let wanted = upcase_name(name);
         self.values()
             .0
             .into_iter()
-            .find(|v| v.name().to_uppercase() == wanted)
+            .find(|v| upcase_name(&v.name()) == wanted)
     }
 }
 

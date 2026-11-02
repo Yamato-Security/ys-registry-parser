@@ -121,15 +121,7 @@ pub fn system_time(bytes: &[u8]) -> Result<Option<SystemTime>, String> {
         second: f[6],
         millisecond: f[7],
     };
-    let valid = (1601..=30_827).contains(&time.year)
-        && (1..=12).contains(&time.month)
-        && time.day >= 1
-        && time.day <= days_in_month(time.year, time.month)
-        && time.hour < 24
-        && time.minute < 60
-        && time.second < 60
-        && time.millisecond < 1000
-        && time.weekday < 7;
+    let valid = valid_time(&time);
     if valid {
         Ok(Some(time))
     } else {
@@ -145,6 +137,18 @@ pub fn system_time(bytes: &[u8]) -> Result<Option<SystemTime>, String> {
             time.weekday
         ))
     }
+}
+
+fn valid_time(time: &SystemTime) -> bool {
+    (1601..=30_827).contains(&time.year)
+        && (1..=12).contains(&time.month)
+        && time.day >= 1
+        && time.day <= days_in_month(time.year, time.month)
+        && time.hour < 24
+        && time.minute < 60
+        && time.second < 60
+        && time.millisecond < 1000
+        && time.weekday < 7
 }
 
 // --- time zone -------------------------------------------------------------------------------
@@ -192,7 +196,8 @@ impl Transition {
     /// The local date and time of the change in `year` (month, day, hour, minute), when it
     /// happens that year.
     fn in_year(&self, year: u16) -> Option<(u16, u16, u16, u16)> {
-        if !(1..=12).contains(&self.month) || self.weekday > 6 {
+        if !(1..=12).contains(&self.month) || self.weekday > 6 || self.hour > 23 || self.minute > 59
+        {
             return None;
         }
         if self.year != 0 {
@@ -246,51 +251,113 @@ impl TimeZone {
                 _ => None,
             }
         };
-        let rule = |name: &str| Transition::read(&key.value(name)?.data().ok()?);
+        let rule = |name: &str| -> Option<Option<Transition>> {
+            let Some(value) = key.value(name) else {
+                return Some(None);
+            };
+            if value.value_type() != ValueType::Binary {
+                return None;
+            }
+            let bytes = value.data().ok()?;
+            // Transition exposes minute precision. Reject unsupported seconds/milliseconds.
+            if bytes.get(10..14)? != [0, 0, 0, 0] {
+                return None;
+            }
+            let rule = Transition::read(&bytes)?;
+            if rule.month != 0
+                && rule
+                    .in_year(if rule.year == 0 { 2000 } else { rule.year })
+                    .is_none()
+            {
+                return None;
+            }
+            Some(Some(rule))
+        };
+        let optional = |name: &str| {
+            if key.value(name).is_some() {
+                signed(name)
+            } else {
+                Some(0)
+            }
+        };
         let text = |name: &str| string(&key.value(name)?).0.filter(|t| !t.is_empty());
         Some(TimeZone {
             name: text("TimeZoneKeyName").or_else(|| text("StandardName")),
             bias: signed("Bias")?,
-            standard_bias: signed("StandardBias").unwrap_or(0),
-            daylight_bias: signed("DaylightBias").unwrap_or(0),
-            standard_start: rule("StandardStart"),
-            daylight_start: rule("DaylightStart"),
-            dynamic_daylight_time_disabled: signed("DynamicDaylightTimeDisabled") == Some(1),
+            standard_bias: optional("StandardBias")?,
+            daylight_bias: optional("DaylightBias")?,
+            standard_start: rule("StandardStart")?,
+            daylight_start: rule("DaylightStart")?,
+            dynamic_daylight_time_disabled: optional("DynamicDaylightTimeDisabled")? == 1,
         })
     }
 
-    /// Whether the local time `time` is in daylight saving time, by the zone's rule for its
-    /// year.
-    fn is_daylight(&self, time: &SystemTime) -> bool {
-        if self.dynamic_daylight_time_disabled {
-            return false;
-        }
-        let (Some(start), Some(end)) = (
-            self.daylight_start.and_then(|r| r.in_year(time.year)),
-            self.standard_start.and_then(|r| r.in_year(time.year)),
-        ) else {
-            return false;
-        };
-        let at = (time.month, time.day, time.hour, time.minute);
-        if start < end {
-            start <= at && at < end
-        } else {
-            at >= start || at < end
-        }
-    }
-
-    /// The local time `time` in UTC, as a FILETIME: plus the bias, and the daylight or standard
-    /// bias its date falls in. `None` when it is out of the FILETIME range.
+    /// Convert a local timestamp only when it has one unambiguous UTC interpretation.
+    /// Missing rules mean no DST; incomplete rules, invalid dates or offsets, DST folds/gaps,
+    /// and timestamps beyond the supported export range return `None`.
     #[must_use]
     pub fn to_utc(&self, time: &SystemTime) -> Option<u64> {
-        let extra = if self.is_daylight(time) {
-            self.daylight_bias
-        } else {
-            self.standard_bias
+        if !valid_time(time) {
+            return None;
+        }
+        let standard = i64::from(self.bias) + i64::from(self.standard_bias);
+        let daylight = i64::from(self.bias) + i64::from(self.daylight_bias);
+        if standard.abs() > 1440 || daylight.abs() > 1440 {
+            return None;
+        }
+        let ticks = |seconds: i64| {
+            let ticks = (i128::from(seconds) + 11_644_473_600) * 10_000_000
+                + i128::from(time.millisecond) * 10_000;
+            u64::try_from(ticks)
+                .ok()
+                .filter(|&t| t > 0 && crate::data::filetime(t).is_some())
         };
-        let seconds = time.seconds() + i64::from(self.bias + extra) * 60;
-        let ticks = (seconds + 11_644_473_600) * 10_000_000 + i64::from(time.millisecond) * 10_000;
-        u64::try_from(ticks).ok().filter(|&t| t > 0)
+        let local = time.seconds();
+        let absent = |r: Option<Transition>| r.is_none_or(|r| r.month == 0);
+        if self.dynamic_daylight_time_disabled
+            || standard == daylight
+            || (absent(self.standard_start) && absent(self.daylight_start))
+        {
+            return ticks(local + standard * 60);
+        }
+        let transition = |rule: Option<Transition>, before: i64| {
+            let (month, day, hour, minute) = rule?.in_year(time.year)?;
+            let at = SystemTime {
+                year: time.year,
+                month,
+                day,
+                hour,
+                minute,
+                second: 0,
+                millisecond: 0,
+                weekday: 0,
+            };
+            Some(at.seconds() + before * 60)
+        };
+        // Each transition is recorded in the local time in force just before the change.
+        let start = transition(self.daylight_start, standard)?;
+        let end = transition(self.standard_start, daylight)?;
+        if start == end {
+            return None;
+        }
+        let is_daylight = |utc| {
+            if start < end {
+                start <= utc && utc < end
+            } else {
+                utc >= start || utc < end
+            }
+        };
+        let mut result = None;
+        for (bias, dst) in [(standard, false), (daylight, true)] {
+            let utc = local + bias * 60;
+            if is_daylight(utc) == dst {
+                if result.is_some() {
+                    return None;
+                }
+                result = ticks(utc);
+            }
+        }
+        result
     }
 }
 
@@ -393,6 +460,13 @@ fn text(key: &Key, name: &str, replayed: &mut bool, problems: &mut Vec<String>) 
     let value = key.value(name)?;
     *replayed |= value.status() == Status::Replayed;
     let (text, why) = string(&value);
+    let why = why.or_else(|| {
+        (!matches!(
+            value.value_type(),
+            ValueType::Sz | ValueType::ExpandSz | ValueType::Link
+        ))
+        .then(|| format!("is {}, not a string", value.value_type().name()))
+    });
     if let Some(why) = why {
         problems.push(format!(
             "{name}: {why}; its data: {}",
@@ -434,7 +508,6 @@ fn texts(key: &Key, name: &str, replayed: &mut bool, problems: &mut Vec<String>)
                 .map(str::to_owned)
                 .collect()
         }
-        _ if bytes.is_empty() => Vec::new(),
         _ => {
             problems.push(format!(
                 "{name}: is {}, not a string; its data: {}",
@@ -486,6 +559,37 @@ pub fn mac(bytes: &[u8]) -> Option<String> {
     })
 }
 
+/// A signature's typed MAC, retaining malformed bytes in its diagnostic.
+fn gateway_mac(key: &Key, replayed: &mut bool, problems: &mut Vec<String>) -> Option<String> {
+    let value = key.value("DefaultGatewayMac")?;
+    *replayed |= value.status() == Status::Replayed;
+    let (bytes, why) = value.read_data();
+    if let Some(why) = why {
+        problems.push(format!(
+            "DefaultGatewayMac: {why}; its data: {}",
+            hex(&bytes)
+        ));
+    }
+    if value.value_type() == ValueType::Binary {
+        let parsed = mac(&bytes);
+        if parsed.is_none() && !bytes.is_empty() {
+            problems.push(format!(
+                "DefaultGatewayMac: {} bytes, not the 6 of a MAC address; its data: {}",
+                bytes.len(),
+                hex(&bytes)
+            ));
+        }
+        parsed
+    } else {
+        problems.push(format!(
+            "DefaultGatewayMac: is {}, not REG_BINARY; its data: {}",
+            value.value_type().name(),
+            hex(&bytes)
+        ));
+        None
+    }
+}
+
 /// The subkeys of the key at `path`, their problems added to `problems`; empty without the key.
 fn subkeys_at<'h>(hive: &'h Hive, path: &str, problems: &mut Vec<String>) -> Vec<Key<'h>> {
     let Some(key) = hive.key(path) else {
@@ -501,12 +605,17 @@ fn profile_time(key: &Key, name: &str, profile: &mut Profile) -> Option<SystemTi
     let value = key.value(name)?;
     profile.replayed |= value.status() == Status::Replayed;
     let (bytes, why) = value.read_data();
-    profile.problems.extend(why.map(|w| format!("{name}: {w}")));
+    if let Some(why) = why {
+        profile.problems.push(format!("{name}: {why}"));
+        profile.data_raw.get_or_insert_with(|| bytes.clone());
+    }
     if value.value_type() != ValueType::Binary {
         profile.problems.push(format!(
             "{name}: is {}, not REG_BINARY",
             value.value_type().name()
         ));
+        profile.data_raw.get_or_insert(bytes);
+        return None;
     }
     match system_time(&bytes) {
         Ok(time) => time,
@@ -549,20 +658,7 @@ pub fn software(hive: &Hive) -> SoftwareNetworks {
             sig.dns_suffix = text(&key, "DnsSuffix", r, p);
             sig.first_network = text(&key, "FirstNetwork", r, p);
             sig.source = number(&key, "Source", r, p);
-            if let Some(value) = key.value("DefaultGatewayMac") {
-                *r |= value.status() == Status::Replayed;
-                let (bytes, why) = value.read_data();
-                p.extend(why.map(|w| format!("DefaultGatewayMac: {w}")));
-                match mac(&bytes) {
-                    Some(text) => sig.gateway_mac = Some(text),
-                    None if bytes.is_empty() => {}
-                    None => p.push(format!(
-                        "DefaultGatewayMac: {} bytes, not the 6 of a MAC address; its data: {}",
-                        bytes.len(),
-                        hex(&bytes)
-                    )),
-                }
-            }
+            sig.gateway_mac = gateway_mac(&key, r, p);
             signatures.push(sig);
         }
     }
@@ -907,6 +1003,9 @@ fn shares(hive: &Hive, prefix: &str, out: &mut SystemNetworks) {
             problems: Vec::new(),
         };
         let (bytes, why) = value.read_data();
+        if why.is_some() {
+            share.data_raw = Some(bytes.clone());
+        }
         share.problems.extend(why);
         if let Data::MultiText { values, lossy } = decode(value.data_type(), &bytes) {
             if lossy {
@@ -988,7 +1087,12 @@ fn port_proxies(hive: &Hive, prefix: &str, out: &mut SystemNetworks) {
                     proxy.connect_port = port;
                 }
                 (None, why) => {
-                    proxy.problems.extend(why);
+                    proxy.problems.push(why.unwrap_or_else(|| {
+                        format!(
+                            "is {}, not a nonempty address/port string",
+                            value.value_type().name()
+                        )
+                    }));
                     proxy.data_raw = Some(value.read_data().0);
                 }
             }
@@ -1188,6 +1292,80 @@ mod tests {
             ..eastern.clone()
         };
         assert_eq!(utc(&at(2021, 7, 1, 12, 0), &none), Some(1_625_158_800));
+    }
+
+    #[test]
+    fn time_zone_conversion_rejects_overflow_and_invalid_dates() {
+        let mut tz = TimeZone {
+            name: None,
+            bias: i32::MAX,
+            standard_bias: 1,
+            daylight_bias: 0,
+            standard_start: None,
+            daylight_start: None,
+            dynamic_daylight_time_disabled: false,
+        };
+        let mut time = SystemTime {
+            year: 2026,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            millisecond: 0,
+            weekday: 4,
+        };
+        assert_eq!(tz.to_utc(&time), None);
+        tz.bias = 0;
+        tz.standard_bias = 0;
+        time.month = 2;
+        time.day = 30;
+        assert_eq!(tz.to_utc(&time), None);
+        time.year = u16::MAX;
+        assert_eq!(tz.to_utc(&time), None);
+    }
+
+    #[test]
+    fn dst_gaps_and_folds_are_not_assigned_a_guessed_utc_time() {
+        let tz = TimeZone {
+            name: None,
+            bias: 300,
+            standard_bias: 0,
+            daylight_bias: -60,
+            dynamic_daylight_time_disabled: false,
+            standard_start: Some(Transition {
+                year: 0,
+                month: 11,
+                day: 1,
+                hour: 2,
+                minute: 0,
+                weekday: 0,
+            }),
+            daylight_start: Some(Transition {
+                year: 0,
+                month: 3,
+                day: 2,
+                hour: 2,
+                minute: 0,
+                weekday: 0,
+            }),
+        };
+        let time = |month, day, hour| SystemTime {
+            year: 2026,
+            month,
+            day,
+            hour,
+            minute: 30,
+            second: 0,
+            millisecond: 0,
+            weekday: 0,
+        };
+        assert_eq!(tz.to_utc(&time(3, 8, 2)), None);
+        assert_eq!(tz.to_utc(&time(11, 1, 1)), None);
+        assert!(tz.to_utc(&time(3, 8, 1)).is_some());
+        assert!(tz.to_utc(&time(3, 8, 3)).is_some());
+        assert!(tz.to_utc(&time(11, 1, 0)).is_some());
+        assert!(tz.to_utc(&time(11, 1, 2)).is_some());
     }
 
     #[test]
