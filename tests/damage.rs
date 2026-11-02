@@ -9,6 +9,10 @@ use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
 use ys_registry_parser::persistence::{self, MachineClasses};
+use ys_registry_parser::remote_access::{
+    connections, host_key_blob, host_key_fingerprint, host_key_name, mount_point_share, mru_list,
+    rdp_target, unescape,
+};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, computer_name, services};
@@ -35,6 +39,23 @@ fn system() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// notatin's Windows 7 NTUSER.DAT, with remote connections of every kind but PuTTY sessions,
+/// unpacked once.
+fn win7_ntuser() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| {
+        let path = format!(
+            "{}/tests/fixtures/notatin/win7_ntuser.dat.gz",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut data = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_end(&mut data)
+            .unwrap();
+        data
+    })
 }
 
 /// Flip bytes of `data` past its base block.
@@ -67,7 +88,7 @@ fn read_all(data: Vec<u8>) {
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
-    let _ = accounts(&hive);
+    let _ = (accounts(&hive), connections(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -108,6 +129,18 @@ proptest! {
         read_all(damage(system().to_vec(), flips));
     }
 
+    /// Remote connections' keys and values damaged: read without a panic.
+    #[test]
+    fn damaged_remote_connections(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(win7_ntuser().to_vec(), flips), &[])
+        {
+            let _ = connections(&hive);
+        }
+    }
+
     #[test]
     fn a_damaged_ntuser_hive(
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
@@ -138,5 +171,26 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+    }
+
+    /// Host keys, names and strings of any text: read as far as they go.
+    #[test]
+    fn remote_connection_texts(
+        key_type in prop_oneof![
+            Just("rsa2".to_owned()),
+            Just("dss".to_owned()),
+            Just("ssh-ed25519".to_owned()),
+            Just("ssh-ed448".to_owned()),
+            Just("ecdsa-sha2-nistp256".to_owned()),
+            Just("ecdsa-sha2-nistp521".to_owned()),
+            Just("rsa".to_owned()),
+            ".{0,12}",
+        ],
+        stored in "(nistp256,|nistp521,)?(0x[0-9a-fA-F]{0,140},?){0,5}|.{0,64}",
+        text in ".{0,64}"
+    ) {
+        let _ = (host_key_fingerprint(&key_type, &stored), host_key_blob(&key_type, &text));
+        let _ = (host_key_name(&text), rdp_target(&text), unescape(&text));
+        let _ = (mount_point_share(&text), mru_list(&text));
     }
 }

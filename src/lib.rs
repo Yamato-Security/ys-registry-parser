@@ -27,11 +27,13 @@
 mod bytes;
 mod data;
 mod deleted;
+mod digest;
 mod hive;
 mod log;
 pub mod ntuser;
 pub mod persistence;
 mod recover;
+pub mod remote_access;
 pub mod sam;
 pub mod software;
 pub mod system;

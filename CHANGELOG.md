@@ -52,3 +52,11 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `remote_access`: the remote connections a user made, from `NTUSER.DAT` (`connections`,
+  `Connection`, `Kind`, `Client`): Remote Desktop's `Terminal Server Client` (`Default` MRU,
+  `Servers` with `UsernameHint` and `CertHash`, `LocalDevices`), PuTTY's and WinSCP's saved
+  sessions and accepted SSH host keys with their OpenSSH SHA-256 fingerprints
+  (`host_key_fingerprint`, `host_key_blob`, `host_key_name`), whether a session stores a password
+  (never decoded), PuTTY's recent sessions, mapped drives (`Network`, `Map Network Drive MRU` with
+  `mru_list`) and `MountPoints2` shares (`mount_point_share`); `rdp_target` and `unescape`.
+  (@YamatoSecurity)
