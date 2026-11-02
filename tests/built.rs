@@ -2125,6 +2125,8 @@ fn usb_history_joins_devices_volumes_names_and_users() {
         history[0].keys,
         [
             format!("SYSTEM {stick}"),
+            r"SYSTEM ControlSet001\Enum\USB\VID_1234&PID_5678\SER123".to_owned(),
+            format!(r"SYSTEM ControlSet001\Enum\SWD\WPDBUSENUM\{stick_path}"),
             format!(
                 r"SOFTWARE {pd}\WPDBUSENUMROOT#UMB#2&37C186B&1&STORAGE#VOLUME#_??_USBSTOR#DISK&VEN_ACME&PROD_STICK&REV_1.00#SER123&0#"
             ),

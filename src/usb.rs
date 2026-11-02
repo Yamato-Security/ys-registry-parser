@@ -969,11 +969,40 @@ impl Join<'_, '_> {
         let storage = storage_of(device.reference.as_ref());
         let mut base = History::new(Some(device.clone()), None);
         if device.class == DeviceClass::UsbStorage {
-            base.vid_pid = usb_ids(device, self.sources.devices);
+            match usb_id_sources(device, self.sources.devices) {
+                Ok(sources) => {
+                    base.vid_pid = sources.first().map(|d| (d.vid.clone(), d.pid.clone()));
+                    for source in sources {
+                        base.found(
+                            "Enum",
+                            "SYSTEM",
+                            format!("SYSTEM {}", source.path),
+                            source.replayed,
+                        );
+                        base.problems.extend(source.problems.iter().cloned());
+                    }
+                }
+                Err(problem) => base.problems.push(problem.to_owned()),
+            }
             for other in self.sources.devices.iter().filter(|o| {
-                o.class == DeviceClass::PortableDevice && names(o.reference.as_ref(), storage)
+                o.class == DeviceClass::PortableDevice
+                    && o.control_set == device.control_set
+                    && names(o.reference.as_ref(), storage)
             }) {
-                add_name(&mut base.volume_names, other.friendly_name.as_deref());
+                if other
+                    .friendly_name
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty())
+                {
+                    add_name(&mut base.volume_names, other.friendly_name.as_deref());
+                    base.found(
+                        "Enum",
+                        "SYSTEM",
+                        format!("SYSTEM {}", other.path),
+                        other.replayed,
+                    );
+                    base.problems.extend(other.problems.iter().cloned());
+                }
             }
         }
         self.software(&mut base, device.reference.as_ref(), storage);
@@ -1122,32 +1151,53 @@ fn add_portable(record: &mut History, portable: &PortableDevice) {
 }
 
 /// The vendor and product IDs of the USB device of USB storage device `storage`.
-fn usb_ids(storage: &Device, devices: &[Device]) -> Option<(Option<String>, Option<String>)> {
-    let usb = devices.iter().filter(|d| {
-        d.class == DeviceClass::Usb && d.control_set == storage.control_set && d.vid.is_some()
-    });
+fn usb_id_sources<'a>(
+    storage: &Device,
+    devices: &'a [Device],
+) -> Result<Vec<&'a Device>, &'static str> {
     let container = storage
         .container_id
         .as_deref()
-        .filter(|c| !c.eq_ignore_ascii_case(NULL_CONTAINER));
-    let found = if let Some(container) = container {
-        usb.clone().find(|d| {
-            d.container_id
-                .as_deref()
-                .is_some_and(|c| c.eq_ignore_ascii_case(container))
+        .filter(|c| is_guid(c) && !c.eq_ignore_ascii_case(NULL_CONTAINER));
+    let candidates: Vec<_> = devices
+        .iter()
+        .filter(|d| {
+            d.class == DeviceClass::Usb
+                && d.control_set == storage.control_set
+                && d.vid.is_some()
+                && if let Some(container) = container {
+                    // A usable container ID is stronger evidence than a repeated serial.
+                    d.container_id
+                        .as_deref()
+                        .is_some_and(|c| c.eq_ignore_ascii_case(container))
+                } else {
+                    storage
+                        .serial
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .is_some_and(|serial| {
+                            d.serial
+                                .as_deref()
+                                .is_some_and(|s| s.eq_ignore_ascii_case(serial))
+                        })
+                }
         })
-    } else {
-        None
+        .collect();
+    let ids: std::collections::BTreeSet<_> = candidates
+        .iter()
+        .map(|d| {
+            (
+                d.vid.as_ref().map(|s| s.to_ascii_uppercase()),
+                d.pid.as_ref().map(|s| s.to_ascii_uppercase()),
+            )
+        })
+        .collect();
+    if ids.len() > 1 {
+        return Err(
+            "ambiguous USB identity: matching devices have conflicting VID/PID values; IDs left unknown",
+        );
     }
-    .or_else(|| {
-        let serial = storage.serial.as_deref()?;
-        usb.clone().find(|d| {
-            d.serial
-                .as_deref()
-                .is_some_and(|s| s.eq_ignore_ascii_case(serial))
-        })
-    })?;
-    Some((found.vid.clone(), found.pid.clone()))
+    Ok(candidates)
 }
 
 /// Add `name` to `names`, once.

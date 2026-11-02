@@ -141,3 +141,90 @@ fn volumes_letters_and_the_user_who_mounted_them() {
     // 8 devices (one with a volume), then 6 volumes no device has
     assert_eq!(history.len(), 14);
 }
+
+fn identity_devices() -> (usb::Device, usb::Device) {
+    let hive = fixture("SYSTEM");
+    let devices = usb::devices(&hive, 1).unwrap().0;
+    let mut storage = devices
+        .iter()
+        .find(|d| d.class == DeviceClass::UsbStorage)
+        .unwrap()
+        .clone();
+    let mut usb = devices
+        .iter()
+        .find(|d| d.class == DeviceClass::Usb && d.vid.is_some())
+        .unwrap()
+        .clone();
+    storage.serial = Some("SERIAL".into());
+    usb.serial = Some("SERIAL".into());
+    storage.container_id = Some("{aaaaaaaa-0000-0000-0000-000000000001}".into());
+    usb.container_id.clone_from(&storage.container_id);
+    storage.replayed = false;
+    usb.replayed = true;
+    (storage, usb)
+}
+fn identity_history(devices: &[usb::Device]) -> usb::History {
+    usb::history(&Sources {
+        devices,
+        mounted: &[],
+        portable: &[],
+        ready_boost: &[],
+        users: &[],
+    })
+    .into_iter()
+    .find(|h| {
+        h.device
+            .as_ref()
+            .is_some_and(|d| d.class == DeviceClass::UsbStorage)
+    })
+    .unwrap()
+}
+#[test]
+fn usb_identity_never_uses_a_conflicting_container_or_ambiguous_ids() {
+    let (storage, mut usb) = identity_devices();
+    usb.container_id = Some("{bbbbbbbb-0000-0000-0000-000000000002}".into());
+    assert!(
+        identity_history(&[storage.clone(), usb.clone()])
+            .vid_pid
+            .is_none()
+    );
+    usb.container_id.clone_from(&storage.container_id);
+    let mut other = usb.clone();
+    other.vid = Some("FFFF".into());
+    other.pid = Some("EEEE".into());
+    assert!(identity_history(&[storage, usb, other]).vid_pid.is_none());
+}
+#[test]
+fn usb_identity_keeps_the_contributing_key_and_replay_provenance() {
+    let (storage, usb) = identity_devices();
+    let history = identity_history(&[storage, usb.clone()]);
+    assert_eq!(history.vid_pid, Some((usb.vid, usb.pid)));
+    assert!(history.keys.contains(&format!("SYSTEM {}", usb.path)));
+    assert!(history.replayed_in.contains(&"SYSTEM"));
+}
+
+#[test]
+fn usb_identity_serial_fallback_is_unique_and_control_set_scoped() {
+    let (mut storage, mut usb) = identity_devices();
+    storage.container_id = None;
+    let expected = Some((usb.vid.clone(), usb.pid.clone()));
+    assert_eq!(
+        identity_history(&[storage.clone(), usb.clone()]).vid_pid,
+        expected
+    );
+    let mut duplicate = usb.clone();
+    duplicate.vid = Some("FFFF".into());
+    duplicate.pid = Some("EEEE".into());
+    assert!(
+        identity_history(&[storage.clone(), usb.clone(), duplicate.clone()])
+            .vid_pid
+            .is_none()
+    );
+    duplicate.control_set = 2;
+    assert_eq!(
+        identity_history(&[storage.clone(), usb.clone(), duplicate]).vid_pid,
+        expected
+    );
+    usb.control_set = 2;
+    assert!(identity_history(&[storage, usb]).vid_pid.is_none());
+}

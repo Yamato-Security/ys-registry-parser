@@ -137,6 +137,9 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   names, serial numbers, the users who had it), then the volumes no device key names (an internal
   disk's, or a removed device's whose `Enum` key is gone), drive letters without a volume GUID
   value, and the devices only `SOFTWARE` names.
+  VID/PID joins require a matching usable container ID; serial fallback is used only without
+  one. Conflicting matching IDs remain unknown and produce a problem. Contributing USB and
+  portable-device keys retain their provenance and replay state, within the same control set.
   A property that isn't a FILETIME keeps its bytes in a problem.
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
