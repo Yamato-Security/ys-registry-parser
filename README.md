@@ -640,11 +640,13 @@ data cells the entry didn't write.
 
 ## Licence
 
-Apache-2.0 (`LICENSE`). The transaction log replay comes from Yamato Security's
-[ys-shimcache-parser](https://github.com/Yamato-Security/ys-shimcache-parser) (Apache-2.0). The
-format is Maxim Suhanov's [Windows registry file format specification](https://github.com/msuhanov/regf)
-(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`),
-and Plaso's and notatin's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`,
+ys-registry-parser is copyright Shirofune Security Co., Ltd. and released under the [Reciprocal
+Public License 1.5](LICENSE) (RPL-1.5); its source code was published under Apache-2.0 before
+version 1.0.0. The transaction log replay comes from Yamato Security's
+[ys-shimcache-parser](https://github.com/Yamato-Security/ys-shimcache-parser). The format is Maxim
+Suhanov's [Windows registry file format specification](https://github.com/msuhanov/regf) (CC BY
+4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`), and
+Plaso's and notatin's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`,
 `tests/fixtures/notatin/LICENSE`).
 
 Application-history tests also use the DFIR Artifact Museum's hives under MIT (`tests/fixtures/museum/LICENSE`).
