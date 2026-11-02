@@ -11,8 +11,9 @@
 //! 10 and 11 have 59, Windows 8.1 and Server 2012 R2 56.
 //!
 //! Windows XP and Server 2003 keep one setting per category (`Layout::Categories`), as the
-//! `POLICY_AUDIT_EVENTS_INFO` structure has them: whether auditing is on, the 9 categories'
-//! settings, and their number (9), as `u32`s.
+//! `POLICY_AUDIT_EVENTS_INFO` structure has them, in 44 bytes: whether auditing is on (a one-byte
+//! `BOOLEAN`, then three bytes of padding that Windows doesn't clear: `00 00 07 00` on a public
+//! Windows XP SP2 image), the 9 categories' settings as `u32`s, and their number (9).
 //!
 //! A setting is 0 (no auditing), 1 (success), 2 (failure) or 3 (both).
 
@@ -242,7 +243,7 @@ const SUBCATEGORIES: [&[(&str, &str)]; 9] = [
 
 /// The size of the subcategory layout's header.
 const HEADER: usize = 12;
-/// The size of the category layout: auditing on, 9 settings, their number.
+/// The size of the category layout: auditing on (and its padding), 9 settings, their number.
 const CATEGORY_LAYOUT: usize = 44;
 /// More categories than this is not a header.
 const MAX_CATEGORIES: u32 = 64;
@@ -388,10 +389,8 @@ pub struct AuditEvents {
 /// `PolAdtEv`'s data, decoded by its layout: see [`AuditEvents`].
 #[must_use]
 pub fn audit_events(bytes: &[u8]) -> AuditEvents {
-    if bytes.len() == CATEGORY_LAYOUT
-        && u32_at(bytes, 40) == Some(9)
-        && u32_at(bytes, 0).is_some_and(|mode| mode <= 1)
-    {
+    // Only the first byte is the BOOLEAN; the padding after it is left as it was.
+    if bytes.len() == CATEGORY_LAYOUT && u32_at(bytes, 40) == Some(9) && bytes[0] <= 1 {
         return categories(bytes);
     }
     subcategories(bytes)
@@ -401,7 +400,7 @@ pub fn audit_events(bytes: &[u8]) -> AuditEvents {
 fn categories(bytes: &[u8]) -> AuditEvents {
     let mut found = AuditEvents {
         layout: Some(Layout::Categories),
-        auditing_mode: u32_at(bytes, 0).map(|m| m == 1),
+        auditing_mode: bytes.first().map(|m| *m == 1),
         ..AuditEvents::default()
     };
     for (i, category) in CATEGORIES.iter().enumerate() {
@@ -712,6 +711,29 @@ mod tests {
             let found = audit_events(&bytes);
             assert_eq!((found.layout, found.problems), (None, vec![why.to_owned()]));
         }
+    }
+
+    #[test]
+    fn the_xp_layout_ignores_the_padding_after_auditing_mode() {
+        // PolAdtEv of a public Windows XP SP2 image: auditing off, no category audited, and
+        // 0x07 in the padding after the BOOLEAN
+        let mut data = vec![0u8; 44];
+        data[2] = 7;
+        data[40] = 9;
+        let found = audit_events(&data);
+        assert_eq!(
+            (found.layout, found.auditing_mode, found.settings.len()),
+            (Some(Layout::Categories), Some(false), 9)
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(found.settings.iter().all(|s| s.setting == Setting::None));
+        // auditing on, with other padding
+        data[0] = 1;
+        data[1] = 0xff;
+        assert_eq!(audit_events(&data).auditing_mode, Some(true));
+        // a first byte that can't be a BOOLEAN is not this layout
+        data[0] = 2;
+        assert_eq!(audit_events(&data).layout, None);
     }
 
     #[test]
