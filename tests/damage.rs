@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
 use ys_registry_parser::ntuser::{
     classes_sid, mui_cache, profile_name, recent_docs, user_assist, user_assist_data,
     user_assist_settings,
@@ -50,6 +51,12 @@ fn ntuser() -> &'static [u8] {
 fn usrclass() -> &'static [u8] {
     static USRCLASS: OnceLock<Vec<u8>> = OnceLock::new();
     USRCLASS.get_or_init(|| fixture("UsrClass.dat"))
+}
+
+/// regipy's `NTUSER-WSL.DAT`, with WSL distributions and App Paths, unpacked once.
+fn ntuser_wsl() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| fixture("NTUSER-WSL.DAT"))
 }
 
 /// Flip bytes of `data` past its base block.
@@ -108,6 +115,7 @@ fn read_all(data: Vec<u8>) {
         mui_cache(&hive),
     );
     let _ = (accounts(&hive), machine_sid(&hive));
+    let _ = (installed::software(&hive), installed::ntuser(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -183,6 +191,20 @@ proptest! {
         read_all(damage(usrclass().to_vec(), flips));
     }
 
+    /// Installed software's keys and values damaged: read without a panic.
+    #[test]
+    fn damaged_installed_software(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(ntuser_wsl().to_vec(), flips), &[])
+        {
+            for program in installed::ntuser(&hive).0 {
+                let _ = program.key_path.rsplit('\\').next().map(package_name);
+            }
+        }
+    }
+
     #[test]
     fn a_damaged_ntuser_hive(
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
@@ -215,6 +237,8 @@ proptest! {
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
         let _ = (usb::mount_target(&rest), usb::mount_target(&bytes));
         let text = String::from_utf8_lossy(&rest);
+        let _ = (unpack_guid(&text), install_date(&text), package_name(&text));
+        let _ = msi_version(u32::from_le_bytes([version as u8, 0, 0, rest.len() as u8]));
         let _ = (usb::device_ref(&text), usb::storage_name(&text), usb::vid_pid(&text));
         let _ = usb::serial("USBSTOR", &text);
         let _ = device_path(&String::from_utf8_lossy(&rest));
