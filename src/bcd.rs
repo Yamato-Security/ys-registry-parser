@@ -546,6 +546,11 @@ fn inherited(
     element: u32,
     os_loader_only: bool,
 ) -> Option<(BcdValue, Option<String>)> {
+    // Application-class settings cannot become applicable merely because a referenced
+    // settings object has a different application type from the original recipient.
+    if os_loader_only && application_type(objects[at].object_type) != Some(OS_LOADER) {
+        return None;
+    }
     let mut seen = HashSet::new();
     let mut stack = vec![(at, 0)];
     while let Some((i, depth)) = stack.pop() {
