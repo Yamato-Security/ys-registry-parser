@@ -22,6 +22,7 @@ use ys_registry_parser::remote_access::{
     rdp_target, unescape,
 };
 use ys_registry_parser::sam::{accounts, machine_sid, user_f, user_v};
+use ys_registry_parser::security_settings;
 use ys_registry_parser::shellbags::shell_bags;
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, bam, computer_name, device_path, services};
@@ -154,6 +155,7 @@ fn read_all(data: Vec<u8>) {
     for set in sets.present {
         let _ = services(&hive, set);
         let _ = persistence::system(&hive, set);
+        let _ = security_settings::system(&hive, set);
         devices.extend(usb::devices(&hive, set).map(|d| d.0).unwrap_or_default());
         let _ = bam(&hive, set);
     }
@@ -190,6 +192,10 @@ fn read_all(data: Vec<u8>) {
     }
     let _ = (system_info::software(&hive), machine_sid(&hive));
     let _ = domains(&hive);
+    let _ = (
+        security_settings::software(&hive),
+        security_settings::ntuser(&hive),
+    );
     let machine = MachineClasses::read(&hive);
     let _ = (feature_usage(&hive), feature_usage_created(&hive));
     let _ = (recent_apps(&hive), taskband(&hive), programs_cache(&hive));

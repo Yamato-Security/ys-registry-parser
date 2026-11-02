@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Security settings keep AMSI COM-value damage and replay provenance, reject invalid RDP ports
+  and distinguish legacy Defender configuration from effective protection. (@YamatoSecurity)
 - FeatureUsage preserves malformed RecentApps values, diagnoses a missing first ProgramsCache
   item, rejects truncated shortcut headers and invalid offsets, and joins local shortcut path
   components without inventing separators. (@YamatoSecurity)
@@ -144,3 +146,10 @@ First version. (@YamatoSecurity)
   and their `RecentItems`), `taskband` (the taskbar's pins in `Favorites`, with their
   application IDs and pin types, and `FavoritesResolve`'s links) and `programs_cache` (the shell
   item lists of `ProgramsCache`, `ProgramsCacheSMP` and `ProgramsCacheTBP`). (@YamatoSecurity)
+- `security_settings`: the security settings attackers change, in `SOFTWARE` (`software`), a
+  `SYSTEM` control set (`system`) and `NTUSER.DAT` (`ntuser`): one `Setting` per value with its
+  `Area`, value, meaning, whether it weakens the default and whether it comes from a `Policies`
+  key; Microsoft Defender (with each exclusion), UAC, `WDigest`, LSA protection, Credential Guard,
+  Restricted Admin, NTLM, Remote Desktop, the firewall, SMBv1, PowerShell (execution policy,
+  logging, AMSI providers), last access times, System Restore and event log sizes and channels.
+  (@YamatoSecurity)

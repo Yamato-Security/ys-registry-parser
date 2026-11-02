@@ -13,6 +13,7 @@ use ys_registry_parser::ntuser::{
 use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
 use ys_registry_parser::remote_access::connections;
 use ys_registry_parser::sam::{accounts, machine_sid};
+use ys_registry_parser::security_settings;
 use ys_registry_parser::shellbags::shell_bags;
 use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
 use ys_registry_parser::system::{Moderator, bam};
@@ -5226,4 +5227,379 @@ fn taskbar_and_programs_cache_validate_binary_types() {
         );
         assert!(entries[0].data_raw.is_some());
     }
+}
+
+/// Each setting as `area setting key\value = value (weakened|ok|-) policy?`.
+fn setting_lines(settings: &[security_settings::Setting]) -> Vec<String> {
+    settings
+        .iter()
+        .map(|s| {
+            format!(
+                r"{} {} {}\{} = {} {}{}",
+                s.area.name(),
+                s.setting,
+                s.key_path,
+                s.value_name,
+                s.value.as_deref().unwrap_or("-"),
+                match s.weakens_default {
+                    Some(true) => "weakened",
+                    Some(false) => "ok",
+                    None => "-",
+                },
+                if s.policy { " policy" } else { "" }
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn security_settings_of_a_software_hive() {
+    let defender = r"Microsoft\Windows Defender";
+    let policy = r"Policies\Microsoft\Windows Defender";
+    let rtp = format!(r"{policy}\Real-Time Protection");
+    let uac = r"Microsoft\Windows\CurrentVersion\Policies\System";
+    let ps = r"Policies\Microsoft\Windows\PowerShell";
+    let channels = r"Microsoft\Windows\CurrentVersion\WINEVT\Channels";
+    let amsi = "{2781761E-28E0-4109-99FE-B9D127C57AFE}";
+    let mut t = Tree::default();
+    t.dword(defender, "DisableAntiSpyware", 0)
+        .dword(&format!(r"{defender}\Features"), "TamperProtection", 4)
+        .dword(&format!(r"{defender}\Spynet"), "SpyNetReporting", 2)
+        .dword(
+            &format!(r"{defender}\Exclusions\Paths"),
+            r"C:\Users\Public\x",
+            0,
+        )
+        .dword(&format!(r"{defender}\Exclusions\Extensions"), ".ps1", 0)
+        .dword(
+            &format!(r"{defender}\Exclusions\Processes"),
+            "rundll32.exe",
+            0,
+        )
+        .dword(
+            &format!(r"{defender}\Exclusions\IpAddresses"),
+            "203.0.113.7",
+            0,
+        )
+        .dword(
+            &format!(r"{defender}\Exclusions\TemporaryPaths"),
+            r"C:\Temp\update",
+            0,
+        )
+        .dword(&format!(r"{policy}\Exclusions\Paths"), r"C:\ProgramData", 0)
+        .dword(policy, "DisableAntiSpyware", 1)
+        .dword(&rtp, "DisableRealtimeMonitoring", 1)
+        .dword(&rtp, "DisableBehaviorMonitoring", 0)
+        // damaged: a number written as a string, and a QWORD past 32 bits
+        .sz(&rtp, "DisableIOAVProtection", "1")
+        .set(&rtp, "DisableScriptScanning", 11, &u64::MAX.to_le_bytes())
+        .dword(uac, "EnableLUA", 1)
+        .dword(uac, "ConsentPromptBehaviorAdmin", 0)
+        .dword(uac, "LocalAccountTokenFilterPolicy", 1)
+        .dword(
+            r"Policies\Microsoft\Windows NT\Terminal Services",
+            "fDenyTSConnections",
+            0,
+        )
+        .dword(
+            r"Policies\Microsoft\WindowsFirewall\PublicProfile",
+            "EnableFirewall",
+            0,
+        )
+        .sz(
+            r"Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell",
+            "ExecutionPolicy",
+            "Bypass",
+        )
+        .dword(
+            &format!(r"{ps}\ScriptBlockLogging"),
+            "EnableScriptBlockLogging",
+            0,
+        )
+        .dword(&format!(r"{ps}\Transcription"), "EnableTranscripting", 1)
+        .sz(
+            &format!(r"{ps}\Transcription"),
+            "OutputDirectory",
+            r"\\fs01\t$",
+        )
+        .sz(
+            &format!(r"Classes\CLSID\{amsi}\InprocServer32"),
+            "",
+            r"C:\ProgramData\Microsoft\Windows Defender\Platform\MpOav.dll",
+        )
+        .dword(
+            r"Microsoft\Windows NT\CurrentVersion\SystemRestore",
+            "DisableSR",
+            1,
+        )
+        .dword(
+            &format!(r"{channels}\Microsoft-Windows-PowerShell/Operational"),
+            "Enabled",
+            0,
+        )
+        .dword(
+            &format!(r"{channels}\Microsoft-Windows-PowerShell/Operational"),
+            "MaxSize",
+            1024 * 1024,
+        )
+        .dword(
+            &format!(r"{channels}\Microsoft-Windows-TaskScheduler/Operational"),
+            "Enabled",
+            1,
+        )
+        .dword(&format!(r"{channels}\Some-Other/Operational"), "Enabled", 0);
+    // AMSI providers: Defender's, with its COM server, and one without (`at` returns the key)
+    t.at(&format!(r"Microsoft\AMSI\Providers\{amsi}"));
+    t.at(r"Microsoft\AMSI\Providers\{00000000-0000-0000-0000-000000000001}");
+    let hive = t.hive("ROOT");
+    let (settings, problems) = security_settings::software(&hive);
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        setting_lines(&settings),
+        [
+            r"defender defender_disable_antispyware Microsoft\Windows Defender\DisableAntiSpyware = 0 ok",
+            r"defender defender_tamper_protection Microsoft\Windows Defender\Features\TamperProtection = 4 weakened",
+            r"defender defender_spynet_reporting Microsoft\Windows Defender\Spynet\SpyNetReporting = 2 ok",
+            r"defender defender_disable_antispyware Policies\Microsoft\Windows Defender\DisableAntiSpyware = 1 weakened policy",
+            r"defender defender_disable_realtime_monitoring Policies\Microsoft\Windows Defender\Real-Time Protection\DisableRealtimeMonitoring = 1 weakened policy",
+            r"defender defender_disable_behavior_monitoring Policies\Microsoft\Windows Defender\Real-Time Protection\DisableBehaviorMonitoring = 0 ok policy",
+            r"defender defender_disable_ioav_protection Policies\Microsoft\Windows Defender\Real-Time Protection\DisableIOAVProtection = - - policy",
+            r"defender defender_disable_script_scanning Policies\Microsoft\Windows Defender\Real-Time Protection\DisableScriptScanning = 18446744073709551615 - policy",
+            r"uac uac_enable_lua Microsoft\Windows\CurrentVersion\Policies\System\EnableLUA = 1 ok policy",
+            r"uac uac_consent_prompt_behavior_admin Microsoft\Windows\CurrentVersion\Policies\System\ConsentPromptBehaviorAdmin = 0 weakened policy",
+            r"uac uac_local_account_token_filter_policy Microsoft\Windows\CurrentVersion\Policies\System\LocalAccountTokenFilterPolicy = 1 weakened policy",
+            r"remote_access rdp_deny_connections Policies\Microsoft\Windows NT\Terminal Services\fDenyTSConnections = 0 weakened policy",
+            r"network firewall_public_profile Policies\Microsoft\WindowsFirewall\PublicProfile\EnableFirewall = 0 weakened policy",
+            r"powershell powershell_execution_policy Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell\ExecutionPolicy = Bypass weakened",
+            r"powershell powershell_script_block_logging Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging\EnableScriptBlockLogging = 0 weakened policy",
+            r"powershell powershell_transcription Policies\Microsoft\Windows\PowerShell\Transcription\EnableTranscripting = 1 ok policy",
+            r"powershell powershell_transcription_directory Policies\Microsoft\Windows\PowerShell\Transcription\OutputDirectory = \\fs01\t$ - policy",
+            r"evidence system_restore_disabled Microsoft\Windows NT\CurrentVersion\SystemRestore\DisableSR = 1 weakened",
+            r"defender defender_exclusion_path Microsoft\Windows Defender\Exclusions\Paths\C:\Users\Public\x = C:\Users\Public\x weakened",
+            r"defender defender_exclusion_extension Microsoft\Windows Defender\Exclusions\Extensions\.ps1 = .ps1 weakened",
+            r"defender defender_exclusion_process Microsoft\Windows Defender\Exclusions\Processes\rundll32.exe = rundll32.exe weakened",
+            r"defender defender_exclusion_ip_address Microsoft\Windows Defender\Exclusions\IpAddresses\203.0.113.7 = 203.0.113.7 weakened",
+            r"defender defender_exclusion_temporary_path Microsoft\Windows Defender\Exclusions\TemporaryPaths\C:\Temp\update = C:\Temp\update -",
+            r"defender defender_exclusion_path Policies\Microsoft\Windows Defender\Exclusions\Paths\C:\ProgramData = C:\ProgramData weakened policy",
+            r"powershell amsi_provider Microsoft\AMSI\Providers\{2781761E-28E0-4109-99FE-B9D127C57AFE}\ = {2781761E-28E0-4109-99FE-B9D127C57AFE} -",
+            r"powershell amsi_provider Microsoft\AMSI\Providers\{00000000-0000-0000-0000-000000000001}\ = {00000000-0000-0000-0000-000000000001} -",
+            r"evidence event_channel_enabled Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-PowerShell/Operational\Enabled = 0 weakened",
+            r"evidence event_channel_max_size Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-PowerShell/Operational\MaxSize = 1048576 -",
+            r"evidence event_channel_enabled Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-TaskScheduler/Operational\Enabled = 1 ok",
+        ]
+    );
+    let meaning = |at: usize| settings[at].meaning.as_str();
+    assert_eq!(meaning(1), "tamper protection off");
+    assert_eq!(meaning(9), "administrators are elevated without a prompt");
+    assert_eq!(
+        meaning(13),
+        "Bypass: nothing is blocked and there are no warnings or prompts"
+    );
+    assert_eq!(
+        meaning(18),
+        "Microsoft Defender doesn't scan files under this path"
+    );
+    assert_eq!(
+        meaning(24),
+        r"an AMSI provider: C:\ProgramData\Microsoft\Windows Defender\Platform\MpOav.dll"
+    );
+    assert_eq!(
+        meaning(25),
+        r"an AMSI provider without a COM server in Classes\CLSID"
+    );
+    assert_eq!(
+        meaning(26),
+        "Microsoft-Windows-PowerShell/Operational turned off; Windows turns it on"
+    );
+    assert_eq!(
+        meaning(27),
+        "Microsoft-Windows-PowerShell/Operational keeps up to 1 MiB"
+    );
+    assert_eq!(
+        meaning(28),
+        "Microsoft-Windows-TaskScheduler/Operational turned on; Windows leaves it off"
+    );
+    // damaged values keep their bytes, and no meaning is guessed
+    assert_eq!(settings[6].problems, ["is REG_SZ, not REG_DWORD"]);
+    assert_eq!(settings[6].data_raw.as_deref(), Some(&utf16z("1")[..]));
+    assert_eq!(settings[6].meaning, "");
+    assert_eq!(
+        settings[7].meaning,
+        "18446744073709551615: not a value Windows documents"
+    );
+    assert_eq!(settings[7].problems, Vec::<String>::new());
+    assert!(
+        settings
+            .iter()
+            .enumerate()
+            .all(|(at, s)| at == 6 || (s.problems.is_empty() && s.data_raw.is_none()))
+    );
+    assert!(
+        settings
+            .iter()
+            .all(|s| s.key_last_written == WHEN && !s.replayed)
+    );
+    assert_eq!(
+        security_settings::software(&Tree::default().hive("ROOT")),
+        (Vec::new(), Vec::new())
+    );
+}
+
+#[test]
+fn security_settings_of_a_system_hive_and_a_user() {
+    let lsa = r"ControlSet001\Control\Lsa";
+    let mut t = Tree::default();
+    t.dword("Select", "Current", 1)
+        .dword(
+            r"ControlSet001\Control\SecurityProviders\WDigest",
+            "UseLogonCredential",
+            1,
+        )
+        .dword(lsa, "RunAsPPL", 0)
+        .dword(lsa, "LsaCfgFlags", 2)
+        .dword(lsa, "DisableRestrictedAdmin", 0)
+        .dword(lsa, "LmCompatibilityLevel", 1)
+        .dword(
+            r"ControlSet001\Control\Terminal Server\WinStations\RDP-Tcp",
+            "PortNumber",
+            33890,
+        )
+        .dword(
+            r"ControlSet001\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile",
+            "EnableFirewall",
+            0,
+        )
+        .dword(r"ControlSet001\Services\LanmanServer\Parameters", "SMB1", 1)
+        .dword(
+            r"ControlSet001\Control\FileSystem",
+            "NtfsDisableLastAccessUpdate",
+            0x8000_0001,
+        )
+        .dword(
+            r"ControlSet001\Services\EventLog\Security",
+            "MaxSize",
+            1 << 20,
+        )
+        .dword(
+            r"ControlSet001\Services\EventLog\System",
+            "MaxSize",
+            64 << 20,
+        )
+        .dword(r"ControlSet002\Control\Lsa", "RunAsPPL", 1);
+    // a log without a size
+    t.at(r"ControlSet001\Services\EventLog\State");
+    let hive = t.hive("ROOT");
+    let (settings, problems) = security_settings::system(&hive, 1).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        setting_lines(&settings),
+        [
+            r"credentials wdigest_use_logon_credential ControlSet001\Control\SecurityProviders\WDigest\UseLogonCredential = 1 weakened",
+            r"credentials lsa_run_as_ppl ControlSet001\Control\Lsa\RunAsPPL = 0 weakened",
+            r"credentials lsa_credential_guard ControlSet001\Control\Lsa\LsaCfgFlags = 2 ok",
+            r"credentials lsa_disable_restricted_admin ControlSet001\Control\Lsa\DisableRestrictedAdmin = 0 weakened",
+            r"credentials lsa_lm_compatibility_level ControlSet001\Control\Lsa\LmCompatibilityLevel = 1 weakened",
+            r"remote_access rdp_port ControlSet001\Control\Terminal Server\WinStations\RDP-Tcp\PortNumber = 33890 ok",
+            r"network firewall_private_profile ControlSet001\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile\EnableFirewall = 0 weakened",
+            r"network smb1_server ControlSet001\Services\LanmanServer\Parameters\SMB1 = 1 weakened",
+            r"evidence ntfs_disable_last_access_update ControlSet001\Control\FileSystem\NtfsDisableLastAccessUpdate = 2147483649 weakened",
+            r"evidence event_log_max_size ControlSet001\Services\EventLog\Security\MaxSize = 1048576 weakened",
+            r"evidence event_log_max_size ControlSet001\Services\EventLog\System\MaxSize = 67108864 ok",
+        ]
+    );
+    assert_eq!(
+        settings[5].meaning,
+        "Remote Desktop listens on TCP 33890, not the default 3389"
+    );
+    assert_eq!(
+        settings[8].meaning,
+        "last access times not updated (user managed: set by hand)"
+    );
+    let (other, _) = security_settings::system(&hive, 2).unwrap();
+    assert_eq!(
+        setting_lines(&other),
+        [r"credentials lsa_run_as_ppl ControlSet002\Control\Lsa\RunAsPPL = 1 ok"]
+    );
+    assert!(security_settings::system(&hive, 3).is_none());
+
+    // a user's: execution policy, a logging policy, AMSI for scripts
+    let mut t = Tree::default();
+    t.sz(
+        r"Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell",
+        "ExecutionPolicy",
+        "Unrestricted",
+    )
+    .dword(
+        r"Software\Policies\Microsoft\Windows\PowerShell\ModuleLogging",
+        "EnableModuleLogging",
+        1,
+    )
+    .dword(
+        r"Software\Microsoft\Windows Script\Settings",
+        "AmsiEnable",
+        0,
+    );
+    assert_eq!(
+        setting_lines(&security_settings::ntuser(&t.hive("ROOT"))),
+        [
+            r"powershell powershell_execution_policy Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell\ExecutionPolicy = Unrestricted weakened",
+            r"powershell powershell_module_logging Software\Policies\Microsoft\Windows\PowerShell\ModuleLogging\EnableModuleLogging = 1 ok policy",
+            r"powershell wsh_amsi_enable Software\Microsoft\Windows Script\Settings\AmsiEnable = 0 weakened",
+        ]
+    );
+}
+
+#[test]
+fn security_settings_preserve_malformed_amsi_server_bytes() {
+    use ys_registry_parser::security_settings::software;
+    let clsid = "{00000000-0000-0000-0000-000000000001}";
+    let mut t = Tree::default();
+    t.at(&format!(r"Microsoft\AMSI\Providers\{clsid}"));
+    t.set(
+        &format!(r"Classes\CLSID\{clsid}\InprocServer32"),
+        "",
+        1,
+        &[b'A', 0, 0xff],
+    );
+    let (records, _) = software(&t.hive("ROOT"));
+    let r = records
+        .iter()
+        .find(|r| r.setting == "amsi_provider")
+        .unwrap();
+    assert!(r.problems.iter().any(|p| p.contains("UTF-16")));
+    assert_eq!(r.data_raw, Some(vec![b'A', 0, 0xff]));
+}
+
+#[test]
+fn security_settings_do_not_silently_skip_damaged_value_lists() {
+    use ys_registry_parser::security_settings;
+    let path = r"Software\Policies\Microsoft\Windows\PowerShell";
+    let mut t = Tree::default();
+    t.dword(path, "Other", 1);
+    let hive = t.hive("ROOT");
+    let offset = hive.key(path).unwrap().offset() as usize;
+    let mut bytes = hive.bytes().to_vec();
+    bytes[4096 + offset + 4 + 0x24..4096 + offset + 4 + 0x28].copy_from_slice(&2u32.to_le_bytes());
+    let hive = Hive::from_bytes(bytes).unwrap();
+    let rows = security_settings::ntuser(&hive);
+    assert!(rows.iter().any(|r| r.setting == "powershell_enable_scripts"
+        && r.value.is_none()
+        && !r.problems.is_empty()));
+}
+
+#[test]
+fn security_text_settings_report_empty_values_of_the_wrong_type() {
+    use ys_registry_parser::security_settings;
+    let mut t = Tree::default();
+    t.set(
+        r"Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell",
+        "ExecutionPolicy",
+        4,
+        &[],
+    );
+    let rows = security_settings::ntuser(&t.hive("ROOT"));
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].problems.iter().any(|p| p.contains("REG_DWORD")));
+    assert_eq!(rows[0].data_raw, Some(vec![]));
 }

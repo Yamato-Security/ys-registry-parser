@@ -88,6 +88,23 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+- Security settings (`security_settings`) in `SOFTWARE` (`software`), a `SYSTEM` control set
+  (`system`) and `NTUSER.DAT` (`ntuser`), one `Setting` per value found, with its `Area`
+  (`defender`, `uac`, `credentials`, `remote_access`, `network`, `powershell`, `evidence`), value,
+  what the value means, whether it weakens what current Windows does by default (`None` where
+  that doesn't apply), and whether it comes from a `Policies` key: Microsoft Defender
+  (`DisableAntiSpyware`, real-time protection, tamper protection, MAPS and samples, and each
+  exclusion of `Exclusions\Paths`, `Extensions`, `Processes`, `IpAddresses` and
+  `TemporaryPaths`, with their policy keys), UAC (`EnableLUA`, `ConsentPromptBehaviorAdmin`,
+  `LocalAccountTokenFilterPolicy`, `FilterAdministratorToken`), credentials (`WDigest`'s
+  `UseLogonCredential`, `Lsa`'s `RunAsPPL`, `LsaCfgFlags`, `DisableRestrictedAdmin`,
+  `LmCompatibilityLevel`), Remote Desktop (`fDenyTSConnections`, the port, Network Level
+  Authentication, and their policies), the firewall profiles' `EnableFirewall` (and policies) and
+  `SMB1`, PowerShell (execution policy, script block, module and transcription logging, each AMSI
+  provider with its DLL, the user's policies and Windows Script Host's `AmsiEnable`), and evidence
+  (`NtfsDisableLastAccessUpdate`, System Restore, each classic event log's `MaxSize`, and whether
+  25 event log channels that record attacks are on, with their sizes). A value of another type
+  keeps its bytes, and no meaning is guessed for it.
 - The remote connections a user made (`remote_access`, from `NTUSER.DAT`): `connections` gives
   one `Connection` per computer, session, host key, mapped drive or share, with its `Kind` and
   `Client` (`rdp`, `putty`, `winscp`, `mapped_drive`, `network_share`), target, port, account,
@@ -353,6 +370,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- Security settings on 24 public `SOFTWARE` and `SYSTEM` hives (regipy's, Plaso's, notatin's and
+  the DFIR Artifact Museum's, Windows 7 to 11 and Server 2012 R2 and 2022, every control set,
+  read without their logs): the same values as regipy's `windows_defender` (10), `uac_plugin`
+  (25), `wdigest` (1), `execution_policy` (2) and `disable_last_access` (18); every one of the
+  564 settings found has the value python-registry reads, but 4 on regipy's damaged `SYSTEM`,
+  where python-registry stops at the key and dissect.regf reads the same values.
 - Remote connections on 27 public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's, artemis' and
   the DFIR Artifact Museum's, Windows XP to 11): the same Remote Desktop servers, accounts and
   times (11), PuTTY sessions (1) and host keys (5), WinSCP sessions (4) and mapped drives (9) as
@@ -513,3 +536,5 @@ and Plaso's and notatin's, under the Apache License 2.0 (`tests/fixtures/plaso/L
 `tests/fixtures/notatin/LICENSE`).
 
 Application-history tests also use the DFIR Artifact Museum's hives under MIT (`tests/fixtures/museum/LICENSE`).
+
+Security-setting tests cover malformed values, exclusions, logging and control sets.
