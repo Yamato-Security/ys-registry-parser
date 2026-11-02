@@ -9,8 +9,9 @@
 //!   8 and later, and `Compatibility Assistant\Persisted`, Windows 7): each program Windows saw
 //!   run (the value's name; `SIGN.MEDIA=<id> <path>` for a program on removable media). A `Store`
 //!   value's data is a `SACP` record, kept as it is (see [`AppCompatEntry::data_raw`]): on Windows
-//!   8.1, 10 and 11 the time in it (at offset 0x2C) is shared by the programs of a hive (one or two
-//!   values, dates Windows builds were made), not when a program ran, so no time is taken from it.
+//!   8.1, 10 and 11 the time in it (at offset 0x2C) is shared by the programs of a hive, and by
+//!   other systems (it looks like the date of a Windows file), not when a program ran, so no time
+//!   is taken from it.
 //! - **CIT** (`SOFTWARE`'s `CIT\Module\<module>`): the programs that loaded each tracked module
 //!   (the value's name) and when they last did (its `REG_QWORD` data); and `CIT\System`'s
 //!   databases (Windows 7 to early Windows 10): each value is LZNT1-compressed
