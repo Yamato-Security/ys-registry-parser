@@ -29,6 +29,7 @@ mod data;
 mod deleted;
 mod hive;
 mod log;
+pub mod networks;
 pub mod ntuser;
 pub mod persistence;
 mod recover;

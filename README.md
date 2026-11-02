@@ -73,6 +73,17 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+- Networks (`networks`): from `SOFTWARE` (`software`), each network profile of
+  `NetworkList\Profiles` (name, description, category, interface type, managed, and
+  `DateCreated` and `DateLastConnected`: local `SYSTEMTIME`s, checked by `system_time`) with the
+  signatures of `Signatures\Managed` and `Unmanaged` that name it (the gateway's MAC address,
+  DNS suffix, first name), the signatures no profile has, and `NetworkCards`; from a `SYSTEM`
+  control set (`system`), each TCP/IP interface (and key under one) with its addresses, masks,
+  gateways, DHCP server, DNS servers, domain and lease times, the shares of
+  `LanmanServer\Shares`, the `netsh interface portproxy` tunnels (`PortProxy\v4tov4`, `v4tov6`,
+  `v6tov4`, `v6tov6`), the persistent routes and the time zone (`TimeZone`, from
+  `TimeZoneInformation`, whose `StandardStart` and `DaylightStart` have the weekday last), which
+  turns a profile's local time into UTC with its daylight saving rule (`TimeZone::to_utc`).
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
@@ -195,6 +206,14 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- Networks on 24 public `SOFTWARE` and `SYSTEM` hives (regipy's, Plaso's, notatin's and the DFIR
+  Artifact Museum's, Windows 7 to 11, Server 2012 R2 and 2022, every control set, read without
+  their logs): the same profiles (25: names, descriptions, categories, managed), signatures (25:
+  profiles, MAC addresses, DNS suffixes, first names), interfaces (68: addresses, DHCP servers,
+  lease times), routes (10) and shares (7) as regipy's `networklist`, `network_data`, `routes`
+  and `shares`, and the same profiles' local times as Plaso's `networks`; on the 8 systems with
+  both hives, every profile time (40) converted to UTC is what IANA's tz database gives for the
+  system's zone (Eastern, Pacific, Mountain, Easter Island).
 - The Task Scheduler's cache on 7 public `SOFTWARE` hives (regipy's Windows 7 and the DFIR
   Artifact Museum's Windows 10, 11, Server 2012 R2 and Server 2022 ones, the dirty ones with
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
@@ -234,7 +253,11 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
-  machine's; random damage, and random `Actions`, `F` and `V`.
+  machine's; networks on regipy's `SYSTEM` (static and leased interfaces, routes, Eastern time)
+  and in built hives with a domain and a wireless profile, two signatures for one profile, one
+  for none, times of the wrong size or date, static and DHCP interfaces with a key under one,
+  shares, port proxies and routes well and badly named, and an Easter Island time zone; random
+  damage, and random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose

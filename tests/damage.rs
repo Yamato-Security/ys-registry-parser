@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::networks;
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
@@ -64,6 +65,17 @@ fn read_all(data: Vec<u8>) {
     for set in sets.present {
         let _ = services(&hive, set);
         let _ = persistence::system(&hive, set);
+        if let Some(n) = networks::system(&hive, set)
+            && let Some(tz) = n.time_zone
+        {
+            let times = networks::software(&hive)
+                .profiles
+                .into_iter()
+                .flat_map(|p| [p.date_created, p.date_last_connected]);
+            for time in times.flatten() {
+                let _ = tz.to_utc(&time);
+            }
+        }
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
@@ -138,5 +150,6 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = networks::system_time(&rest).map(|t| t.map(|t| t.text()));
     }
 }

@@ -52,3 +52,9 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `networks`: the networks a system joined and how it was set up. From `SOFTWARE` (`software`):
+  network profiles with their local first and last connection times (`SystemTime`,
+  `system_time`) and the signatures that name them (gateway MAC address, DNS suffix), and the
+  network cards. From a `SYSTEM` control set (`system`): TCP/IP interfaces, shares, port proxies,
+  persistent routes, and the time zone (`TimeZone`), which converts a local time to UTC with its
+  daylight saving rule (`TimeZone::to_utc`). (@YamatoSecurity)
