@@ -33,8 +33,10 @@ pub mod ntuser;
 pub mod persistence;
 mod recover;
 pub mod sam;
+pub mod shellbags;
 pub mod software;
 pub mod system;
+pub mod usb;
 
 use std::path::Path;
 
