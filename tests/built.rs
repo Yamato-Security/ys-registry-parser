@@ -10,6 +10,7 @@ use ys_registry_parser::appcompat::{self, AppCompatEntry};
 use ys_registry_parser::audit_policy::{Layout, Setting, audit_policy};
 use ys_registry_parser::installed::{self, Program, ProgramSource, Scope};
 use ys_registry_parser::lsa_secrets::{cached_logons, secrets};
+use ys_registry_parser::networks;
 use ys_registry_parser::ntuser::{
     classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
 };
@@ -6755,4 +6756,414 @@ fn lsa_cache_damaged_headers_do_not_count_as_valid_users() {
     assert_eq!(cache.control_count, None);
     assert_eq!(cache.problems.len(), 5);
     assert!(!format!("{cache:?}").contains("5a5a"));
+}
+
+/// A `SYSTEMTIME`'s 16 bytes: year, month, weekday, day, hour, minute, second, millisecond.
+fn systemtime(fields: [u16; 8]) -> Vec<u8> {
+    fields.iter().flat_map(|n| n.to_le_bytes()).collect()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn networks_of_a_software_hive() {
+    let list = r"Microsoft\Windows NT\CurrentVersion\NetworkList";
+    let corp = format!(r"{list}\Profiles\{{8148D564-B67F-423F-9C2C-9CA1D61F18AE}}");
+    let cafe = format!(r"{list}\Profiles\{{D4BA51F6-8576-40A9-953A-42027C41ED4F}}");
+    let broken = format!(r"{list}\Profiles\{{00000000-0000-0000-0000-00000000000B}}");
+    let managed = format!(r"{list}\Signatures\Managed\010103000F0000F0A000");
+    let managed2 = format!(r"{list}\Signatures\Managed\010103000F0000F0A001");
+    let unmanaged = format!(r"{list}\Signatures\Unmanaged\010103000F0000F00800");
+    let orphan = format!(r"{list}\Signatures\Unmanaged\010103000F0000F00801");
+    let mut t = Tree::default();
+    // the signatures first: Windows sorts Signatures before Profiles' readers need them
+    t.sz(
+        &managed,
+        "ProfileGuid",
+        "{8148D564-B67F-423F-9C2C-9CA1D61F18AE}",
+    )
+    .sz(&managed, "DnsSuffix", "corp.example")
+    .set(
+        &managed,
+        "DefaultGatewayMac",
+        3,
+        &[0, 0x0c, 0x29, 0x67, 0x10, 0x19],
+    )
+    .dword(&managed, "Source", 8)
+    .sz(
+        &managed2,
+        "ProfileGuid",
+        "{8148d564-b67f-423f-9c2c-9ca1d61f18ae}",
+    )
+    .set(
+        &managed2,
+        "DefaultGatewayMac",
+        3,
+        &[0, 0x0c, 0x29, 0x67, 0x10, 0x20],
+    )
+    .sz(
+        &unmanaged,
+        "ProfileGuid",
+        "{D4BA51F6-8576-40A9-953A-42027C41ED4F}",
+    )
+    .sz(&unmanaged, "FirstNetwork", "Cafe WiFi")
+    // damaged: 3 bytes for a MAC address
+    .set(&unmanaged, "DefaultGatewayMac", 3, &[1, 2, 3])
+    .sz(
+        &orphan,
+        "ProfileGuid",
+        "{FFFFFFFF-0000-0000-0000-000000000000}",
+    )
+    .sz(&orphan, "Description", "gone")
+    .sz(&corp, "ProfileName", "corp.example")
+    .dword(&corp, "Category", 2)
+    .dword(&corp, "NameType", 6)
+    .dword(&corp, "Managed", 1)
+    .set(
+        &corp,
+        "DateCreated",
+        3,
+        &systemtime([2020, 8, 6, 1, 16, 1, 57, 882]),
+    )
+    .set(
+        &corp,
+        "DateLastConnected",
+        3,
+        &systemtime([2021, 2, 3, 10, 14, 50, 37, 716]),
+    )
+    .sz(&cafe, "ProfileName", "Cafe WiFi")
+    .sz(&cafe, "Description", "Cafe WiFi")
+    .dword(&cafe, "Category", 0)
+    .dword(&cafe, "NameType", 71)
+    .set(&cafe, "DateCreated", 3, &[0; 16])
+    // damaged: a SYSTEMTIME of 15 bytes, and February 30th
+    .set(&broken, "DateCreated", 3, &[1; 15])
+    .set(
+        &broken,
+        "DateLastConnected",
+        3,
+        &systemtime([2021, 2, 2, 30, 0, 0, 0, 0]),
+    )
+    .sz(
+        r"Microsoft\Windows NT\CurrentVersion\NetworkCards\2",
+        "ServiceName",
+        "{DAE79B04-8A4E-46D0-A8DB-EE10ABBFFE64}",
+    )
+    .sz(
+        r"Microsoft\Windows NT\CurrentVersion\NetworkCards\2",
+        "Description",
+        "Example Network Adapter",
+    );
+    let hive = t.hive("ROOT");
+    let networks = networks::software(&hive);
+    assert_eq!(networks.problems, Vec::<String>::new());
+    let profiles: Vec<String> = networks
+        .profiles
+        .iter()
+        .map(|p| {
+            format!(
+                "{} {:?} {:?} {:?} {} {} | {}",
+                p.profile_name.as_deref().unwrap_or("-"),
+                p.category.and_then(networks::category_name),
+                p.name_type.and_then(networks::connection_type_name),
+                p.managed,
+                p.date_created.map_or("-".to_owned(), |t| t.text()),
+                p.date_last_connected.map_or("-".to_owned(), |t| t.text()),
+                p.signatures
+                    .iter()
+                    .map(|s| s.gateway_mac.as_deref().unwrap_or("-"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect();
+    assert_eq!(
+        profiles,
+        [
+            "corp.example Some(\"domain\") Some(\"wired\") Some(true) 2020-08-01T16:01:57.882 2021-02-10T14:50:37.716 | 00:0c:29:67:10:19 00:0c:29:67:10:20",
+            "Cafe WiFi Some(\"public\") Some(\"wireless\") None - - | -",
+            "- None None None - - | ",
+        ]
+    );
+    assert_eq!(
+        networks.profiles[0].signatures[0].dns_suffix.as_deref(),
+        Some("corp.example")
+    );
+    assert!(networks.profiles[0].signatures[0].managed);
+    assert_eq!(networks.profiles[0].signatures[0].source, Some(8));
+    assert_eq!(
+        networks.profiles[1].signatures[0].problems,
+        ["DefaultGatewayMac: 3 bytes, not the 6 of a MAC address; its data: 010203"]
+    );
+    assert_eq!(
+        networks.profiles[1].signatures[0].first_network.as_deref(),
+        Some("Cafe WiFi")
+    );
+    // a time of 16 zero bytes is none; damaged times keep their bytes
+    assert_eq!(networks.profiles[1].problems, Vec::<String>::new());
+    assert_eq!(
+        networks.profiles[2].problems,
+        [
+            "DateCreated: 15 bytes, not the 16 of a SYSTEMTIME",
+            "DateLastConnected: 2021-02-30 00:00:00.000 (weekday 2) is not a valid SYSTEMTIME",
+        ]
+    );
+    assert_eq!(
+        networks.profiles[2].data_raw.as_deref(),
+        Some(&[1u8; 15][..])
+    );
+    // the signature of no profile, and the card
+    assert_eq!(networks.signatures.len(), 1);
+    assert_eq!(networks.signatures[0].description.as_deref(), Some("gone"));
+    assert!(!networks.signatures[0].managed);
+    assert_eq!(
+        (
+            networks.cards[0].service_name.as_deref(),
+            networks.cards[0].description.as_deref()
+        ),
+        (
+            Some("{DAE79B04-8A4E-46D0-A8DB-EE10ABBFFE64}"),
+            Some("Example Network Adapter")
+        )
+    );
+    assert_eq!(
+        networks::software(&Tree::default().hive("ROOT")),
+        networks::SoftwareNetworks::default()
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn networks_of_a_system_hive() {
+    let interfaces = r"ControlSet001\Services\Tcpip\Parameters\Interfaces";
+    let dhcp = format!(r"{interfaces}\{{dae79b04-8a4e-46d0-a8db-ee10abbffe64}}");
+    let fixed = format!(r"{interfaces}\{{791D93FB-6EDF-4C65-B1B9-F8E46CFFEA73}}");
+    let network = format!(r"{dhcp}\43616665");
+    let tz = r"ControlSet001\Control\TimeZoneInformation";
+    // TIME_FIELDS: year, month, day (the week), hour, minute, second, millisecond, weekday
+    let rule = |month: u16| systemtime([0, month, 1, 22, 0, 0, 0, 6]);
+    let mut t = Tree::default();
+    t.dword("Select", "Current", 1)
+        .dword(&dhcp, "EnableDHCP", 1)
+        .sz(&dhcp, "DhcpIPAddress", "172.27.213.248")
+        .sz(&dhcp, "DhcpSubnetMask", "255.255.240.0")
+        .multi(&dhcp, "DhcpDefaultGateway", &["172.27.208.1"])
+        .sz(&dhcp, "DhcpServer", "172.27.208.1")
+        .sz(&dhcp, "DhcpNameServer", "172.27.208.1 192.0.2.53")
+        .sz(&dhcp, "DhcpDomain", "mshome.net")
+        .dword(&dhcp, "LeaseObtainedTime", 1_613_269_900)
+        .dword(&dhcp, "LeaseTerminatesTime", 1_613_356_300)
+        // a static address left over from before DHCP: not the one in use
+        .multi(&dhcp, "IPAddress", &["10.0.0.9"])
+        .sz(&network, "DhcpIPAddress", "192.0.2.10")
+        .dword(&fixed, "EnableDHCP", 0)
+        .multi(&fixed, "IPAddress", &["10.42.85.10"])
+        .multi(&fixed, "SubnetMask", &["255.255.255.0"])
+        .multi(&fixed, "DefaultGateway", &["10.42.85.100"])
+        .sz(&fixed, "NameServer", "127.0.0.1")
+        .sz(&fixed, "DhcpServer", "255.255.255.255")
+        // damaged: a number as a string
+        .sz(&fixed, "LeaseObtainedTime", "1600362219")
+        .multi(
+            r"ControlSet001\Services\LanmanServer\Shares",
+            "Staging$",
+            &[
+                "CSCFlags=0",
+                "MaxUses=4294967295",
+                r"Path=C:\ProgramData\stage",
+                "Permissions=0",
+                "Remark=",
+                "ShareName=Staging$",
+                "Type=0",
+            ],
+        )
+        .sz(
+            r"ControlSet001\Services\LanmanServer\Shares",
+            "Broken",
+            r"C:\x",
+        )
+        .sz(
+            r"ControlSet001\Services\PortProxy\v4tov4\tcp",
+            "0.0.0.0/3389",
+            "10.0.0.5/3389",
+        )
+        .sz(
+            r"ControlSet001\Services\PortProxy\v4tov6\tcp",
+            "*/8443",
+            "fe80::1/443",
+        )
+        .sz(
+            r"ControlSet001\Services\PortProxy\v4tov4\tcp",
+            "nonsense",
+            "also nonsense",
+        )
+        .sz(
+            r"ControlSet001\Services\Tcpip\Parameters\PersistentRoutes",
+            "10.10.0.0,255.255.0.0,10.42.85.1,1",
+            "",
+        )
+        .sz(
+            r"ControlSet001\Services\Tcpip\Parameters\PersistentRoutes",
+            "10.11.0.0",
+            "",
+        )
+        .sz(tz, "TimeZoneKeyName", "Easter Island Standard Time")
+        .dword(tz, "Bias", 360)
+        .dword(tz, "DaylightBias", 0xffff_ffc4)
+        .set(tz, "StandardStart", 3, &rule(4))
+        .set(tz, "DaylightStart", 3, &rule(9));
+    let hive = t.hive("ROOT");
+    let networks = networks::system(&hive, 1).unwrap();
+    assert_eq!(networks.problems, Vec::<String>::new());
+    let lines: Vec<String> = networks
+        .interfaces
+        .iter()
+        .map(|i| {
+            format!(
+                "{} {:?} {:?} {} {} {} {:?} {} {:?} {:?} {:?}",
+                i.guid,
+                i.subkey,
+                i.dhcp_enabled,
+                i.ip_addresses.join(","),
+                i.subnet_masks.join(","),
+                i.default_gateways.join(","),
+                i.dhcp_server,
+                i.name_servers.join(","),
+                i.domain,
+                i.lease_obtained,
+                i.lease_terminates
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            r#"{dae79b04-8a4e-46d0-a8db-ee10abbffe64} None Some(true) 172.27.213.248 255.255.240.0 172.27.208.1 Some("172.27.208.1") 172.27.208.1,192.0.2.53 Some("mshome.net") Some(1613269900) Some(1613356300)"#,
+            r#"{dae79b04-8a4e-46d0-a8db-ee10abbffe64} Some("43616665") None 192.0.2.10   None  None None None"#,
+            r"{791D93FB-6EDF-4C65-B1B9-F8E46CFFEA73} None Some(false) 10.42.85.10 255.255.255.0 10.42.85.100 None 127.0.0.1 None None None",
+        ]
+    );
+    assert_eq!(
+        networks.interfaces[2].problems,
+        [
+            "LeaseObtainedTime: is REG_SZ, not REG_DWORD; its data: 31003600300030003300360032003200310039000000"
+        ]
+    );
+    let share = &networks.shares[0];
+    assert_eq!(
+        (
+            share.name.as_str(),
+            share.path.as_deref(),
+            share.remark.as_deref(),
+            share.share_type
+        ),
+        ("Staging$", Some(r"C:\ProgramData\stage"), None, Some(0))
+    );
+    assert_eq!(share.fields.len(), 7);
+    assert_eq!(networks.shares[1].problems, ["is REG_SZ, not REG_MULTI_SZ"]);
+    assert!(networks.shares[1].data_raw.is_some());
+    let proxies: Vec<String> = networks
+        .port_proxies
+        .iter()
+        .map(|p| {
+            format!(
+                "{} {} {:?} {:?} {:?} {}",
+                p.kind,
+                p.listen_address,
+                p.listen_port,
+                p.connect_address,
+                p.connect_port,
+                p.problems.join("; ")
+            )
+        })
+        .collect();
+    assert_eq!(
+        proxies,
+        [
+            r#"v4tov4 0.0.0.0 Some(3389) Some("10.0.0.5") Some(3389) "#,
+            r#"v4tov4 nonsense None Some("also nonsense") None its name isn't listenaddress/listenport; "also nonsense" isn't connectaddress/connectport"#,
+            r#"v4tov6 * Some(8443) Some("fe80::1") Some(443) "#,
+        ]
+    );
+    assert_eq!(networks.routes[0].destination.as_deref(), Some("10.10.0.0"));
+    assert_eq!(networks.routes[0].netmask.as_deref(), Some("255.255.0.0"));
+    assert_eq!(
+        networks.routes[1].problems,
+        ["its name isn't destination,netmask,gateway,metric"]
+    );
+    // the time zone: Easter Island, daylight saving time from September to April
+    let tz = networks.time_zone.unwrap();
+    assert_eq!(
+        (tz.name.as_deref(), tz.bias, tz.daylight_bias),
+        (Some("Easter Island Standard Time"), 360, -60)
+    );
+    let local = |month, day, hour| networks::SystemTime {
+        year: 2021,
+        month,
+        day,
+        hour,
+        minute: 50,
+        second: 37,
+        millisecond: 716,
+        weekday: 0,
+    };
+    let utc = |t| ys_registry_parser::filetime(tz.to_utc(&t).unwrap()).unwrap();
+    // 2021-02-10 14:50:37.716 at UTC-5, 2021-08-09 14:50:37.716 at UTC-6
+    assert_eq!(utc(local(2, 10, 14)), (1_612_986_637, 716_000_000));
+    assert_eq!(utc(local(8, 9, 14)), (1_628_542_237, 716_000_000));
+    assert!(networks::system(&hive, 2).is_none());
+}
+
+#[test]
+fn network_values_keep_wrong_type_empty_data_and_do_not_invent_times_or_macs() {
+    use ys_registry_parser::networks;
+    let mut t = Tree::default();
+    let profile = r"Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\{profile}";
+    t.set(profile, "ProfileName", 4, &[]);
+    t.set(profile, "DateCreated", 1, &[0; 16]);
+    let signature =
+        r"Microsoft\Windows NT\CurrentVersion\NetworkList\Signatures\Unmanaged\signature";
+    t.set(signature, "DefaultGatewayMac", 1, &[1, 2, 3, 4, 5, 6]);
+    let hive = t.hive("SOFTWARE");
+    let found = networks::software(&hive);
+    assert!(
+        found.profiles[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("ProfileName"))
+    );
+    assert_eq!(found.profiles[0].data_raw, Some(vec![0; 16]));
+    assert_eq!(found.signatures[0].gateway_mac, None);
+    assert!(
+        found.signatures[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("DefaultGatewayMac"))
+    );
+    let mut t = Tree::default();
+    t.set(
+        r"ControlSet001\Services\Tcpip\Parameters\Interfaces\{interface}",
+        "NameServer",
+        4,
+        &[],
+    );
+    t.set(
+        r"ControlSet001\Services\PortProxy\v4tov4\tcp",
+        "0.0.0.0/80",
+        3,
+        &[],
+    );
+    let hive = t.hive("SYSTEM");
+    let found = networks::system(&hive, 1).unwrap();
+    assert!(
+        found.interfaces[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("NameServer"))
+    );
+    assert!(
+        found.port_proxies[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("nonempty address/port"))
+    );
 }

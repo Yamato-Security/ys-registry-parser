@@ -88,6 +88,17 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+- Networks (`networks`): from `SOFTWARE` (`software`), each network profile of
+  `NetworkList\Profiles` (name, description, category, interface type, managed, and
+  `DateCreated` and `DateLastConnected`: local `SYSTEMTIME`s, checked by `system_time`) with the
+  signatures of `Signatures\Managed` and `Unmanaged` that name it (the gateway's MAC address,
+  DNS suffix, first name), the signatures no profile has, and `NetworkCards`; from a `SYSTEM`
+  control set (`system`), each TCP/IP interface (and key under one) with its addresses, masks,
+  gateways, DHCP server, DNS servers, domain and lease times, the shares of
+  `LanmanServer\Shares`, the `netsh interface portproxy` tunnels (`PortProxy\v4tov4`, `v4tov6`,
+  `v6tov4`, `v6tov6`), the persistent routes and the time zone (`TimeZone`, from
+  `TimeZoneInformation`, whose `StandardStart` and `DaylightStart` have the weekday last), which
+  turns a profile's local time into UTC with its daylight saving rule (`TimeZone::to_utc`).
 - Security settings (`security_settings`) in `SOFTWARE` (`software`), a `SYSTEM` control set
   (`system`) and `NTUSER.DAT` (`ntuser`), one `Setting` per value found, with its `Area`
   (`defender`, `uac`, `credentials`, `remote_access`, `network`, `powershell`, `evidence`), value,
@@ -431,6 +442,14 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- Networks on 24 public `SOFTWARE` and `SYSTEM` hives (regipy's, Plaso's, notatin's and the DFIR
+  Artifact Museum's, Windows 7 to 11, Server 2012 R2 and 2022, every control set, read without
+  their logs): the same profiles (25: names, descriptions, categories, managed), signatures (25:
+  profiles, MAC addresses, DNS suffixes, first names), interfaces (68: addresses, DHCP servers,
+  lease times), routes (10) and shares (7) as regipy's `networklist`, `network_data`, `routes`
+  and `shares`, and the same profiles' local times as Plaso's `networks`; on the 8 systems with
+  both hives, every profile time (40) converted to UTC is what IANA's tz database gives for the
+  system's zone (Eastern, Pacific, Mountain, Easter Island).
 - Security settings on 24 public `SOFTWARE` and `SYSTEM` hives (regipy's, Plaso's, notatin's and
   the DFIR Artifact Museum's, Windows 7 to 11 and Server 2012 R2 and 2022, every control set,
   read without their logs): the same values as regipy's `windows_defender` (10), `uac_plugin`

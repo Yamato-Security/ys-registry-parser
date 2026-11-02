@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Network timestamps reject overflowing offsets, invalid dates and ambiguous/nonexistent DST
+  times. Retain malformed network values and diagnose wrong types. (@YamatoSecurity)
 - Diagnose invalid LSA-secret update times and malformed cached-logon headers without exposing
   credential bytes or counting damaged records as valid users. (@YamatoSecurity)
 - Do not apply inherited OS-loader-only BCD settings to boot-manager objects. (@YamatoSecurity)
@@ -193,3 +195,9 @@ First version. (@YamatoSecurity)
   and times only: whether `CurrVal` and `OldVal` hold data (their sizes, the bytes never read),
   their keys' times and `CupdTime` and `OupdTime`; the cache's slots, those in use and
   `NL$Control`'s count. Nothing is decrypted. (@YamatoSecurity)
+- `networks`: the networks a system joined and how it was set up. From `SOFTWARE` (`software`):
+  network profiles with their local first and last connection times (`SystemTime`,
+  `system_time`) and the signatures that name them (gateway MAC address, DNS suffix), and the
+  network cards. From a `SYSTEM` control set (`system`): TCP/IP interfaces, shares, port proxies,
+  persistent routes, and the time zone (`TimeZone`), which converts a local time to UTC with its
+  daylight saving rule (`TimeZone::to_utc`). (@YamatoSecurity)

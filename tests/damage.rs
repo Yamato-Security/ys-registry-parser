@@ -13,6 +13,7 @@ use ys_registry_parser::comdlg32::{dialogs, item_list_problem};
 use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
 use ys_registry_parser::lsa_secrets::{cached_logons, secret_kind, secrets};
 use ys_registry_parser::mru::mru_lists;
+use ys_registry_parser::networks;
 use ys_registry_parser::ntuser::{
     classes_sid, mui_cache, profile_name, recent_docs, user_assist, user_assist_data,
     user_assist_settings,
@@ -193,6 +194,17 @@ fn read_all(data: Vec<u8>) {
     for set in sets.present {
         let _ = services(&hive, set);
         let _ = persistence::system(&hive, set);
+        if let Some(n) = networks::system(&hive, set)
+            && let Some(tz) = n.time_zone
+        {
+            let times = networks::software(&hive)
+                .profiles
+                .into_iter()
+                .flat_map(|p| [p.date_created, p.date_last_connected]);
+            for time in times.flatten() {
+                let _ = tz.to_utc(&time);
+            }
+        }
         let _ = security_settings::system(&hive, set);
         devices.extend(usb::devices(&hive, set).map(|d| d.0).unwrap_or_default());
         let _ = bam(&hive, set);
@@ -434,6 +446,7 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = networks::system_time(&rest).map(|t| t.map(|t| t.text()));
         let _ = secret_kind(&String::from_utf8_lossy(&rest));
         let _ = (device_summary(&rest), device_summary(&bytes));
         let _ = appcompat::lznt1(&rest, 1 << 16);
