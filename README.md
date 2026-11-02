@@ -57,6 +57,13 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `FailureActions` value (`SERVICE_FAILURE_ACTIONS`: reset period, whether a reboot message and a
   command are set, then each action and its delay); `start_name`, `type_names` and
   `error_control_name` name the numbers.
+  `bam` gives when each user last ran each program as the Background and Desktop Activity
+  Moderators recorded it: every value of each user's key (named after the user's SID) under
+  `Services\bam` and `Services\dam`, in both layouts (`State\UserSettings`, Windows 10 1809 and
+  later, and `UserSettings`, 1709 to 1803), without `Version` and `SequenceNumber`; the value's
+  name is the program (a `\Device\HarddiskVolumeN\…` path, which `device_path` splits into the
+  device and the path on it, or a packaged app's ID) and the first 8 bytes of its data are the
+  time it last ran. Data that isn't `REG_BINARY` or holds fewer than 8 bytes keeps its bytes.
 - `NTUSER.DAT` hives (`ntuser`): Explorer's recent documents (`recent_docs`), from `RecentDocs`
   and each of its subkeys (one per extension, and `Folder`): every item in the order of the key's
   `MRUListEx` (`mru_list_ex`), its name, and the name of its shortcut in the `Recent` folder (the
@@ -90,7 +97,8 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   logon script, profile path), the password hint, the Microsoft account it is linked to, and
   whether the sign-in screen hides it; its `Names` entry's RID and time (about when the account
   was made) are matched with it, and what disagrees is reported. `account_flag_names` names the
-  flags. Password hashes are not read.
+  flags. `machine_sid` gives the computer's SID (its local accounts' SIDs are it and their RIDs),
+  from the end of `SAM\Domains\Account`'s `V`. Password hashes are not read.
 - Autostart locations (`persistence`), one `Autostart` per program, DLL or package a value names
   (a list gives one each), with its `Mechanism` (`name`, and `attack_technique`: its MITRE
   ATT&CK technique, where one fits), key, value, data, program and arguments (`command_line`
@@ -232,6 +240,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   one record whose type no Windows value has; on those two dirty hives and the DFIR Artifact
   Museum's Windows 11 `SYSTEM`, every key and value that yarp's replay removes or changes is
   recovered from the hive before the replay.
+- BAM on 11 public `SYSTEM` hives (regipy's, Plaso's, notatin's, dissect's and the DFIR Artifact
+  Museum's, Windows 7 to 11, Server 2012 R2 and 2022; 8 with BAM keys, both layouts, every
+  control set; 199 entries): the same keys, SIDs, programs and times as regipy's `bam` plugin
+  (which rounds times to the microsecond), and the same programs and times to the 100 ns as
+  Plaso's `bam`. `machine_sid` on two of the Museum's Windows 10 systems: the SID of their local
+  users' BAM keys and `ProfileList` entries, not their domain users'.
 - Autostarts on 10 public `SOFTWARE` and `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
   artemis' and the DFIR Artifact Museum's Windows 10 ones): the same `Run`, `RunOnce`,
   `RunServices` and `Policies\Explorer\Run` values (27) as regipy's `software_plugin` and
@@ -253,7 +267,8 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
   and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
-  (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile,
+  (control sets, computer name, services), its Windows 10 1709 `SYSTEM` (BAM in both layouts)
+  and `NTUSER.DAT` (recent documents, profile,
   UserAssist, and its dirty `NTUSER.DAT` with the items its logs add); UserAssist built with both
   versions, a value of another size, a version that disagrees with the key's, an unknown GUID,
   session entries and `NoEncrypt`; recent
@@ -266,7 +281,9 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
-  machine's; random damage, and random `Actions`, `F` and `V`.
+  machine's; BAM and DAM keys in both layouts with values that aren't `REG_BINARY` or are cut
+  short; `SAM\Domains\Account` `V` with and without the computer's SID; random damage, and
+  random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose

@@ -9,9 +9,9 @@ use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
 use ys_registry_parser::persistence::{self, MachineClasses};
-use ys_registry_parser::sam::{accounts, user_f, user_v};
+use ys_registry_parser::sam::{accounts, machine_sid, user_f, user_v};
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
-use ys_registry_parser::system::{ControlSets, computer_name, services};
+use ys_registry_parser::system::{ControlSets, bam, computer_name, device_path, services};
 use ys_registry_parser::usb;
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -30,6 +30,12 @@ fn fixture(name: &str) -> Vec<u8> {
 fn system() -> &'static [u8] {
     static SYSTEM: OnceLock<Vec<u8>> = OnceLock::new();
     SYSTEM.get_or_init(|| fixture("SYSTEM"))
+}
+
+/// The Windows 10 SYSTEM hive with BAM keys, unpacked once.
+fn system_win10() -> &'static [u8] {
+    static SYSTEM: OnceLock<Vec<u8>> = OnceLock::new();
+    SYSTEM.get_or_init(|| fixture("SYSTEM_WIN_10_1709"))
 }
 
 /// The NTUSER.DAT hive, unpacked once.
@@ -67,6 +73,7 @@ fn read_all(data: Vec<u8>) {
         let _ = services(&hive, set);
         let _ = persistence::system(&hive, set);
         devices.extend(usb::devices(&hive, set).map(|d| d.0).unwrap_or_default());
+        let _ = bam(&hive, set);
     }
     // the USB history of a hive that is every one of its hives at once
     let mounted = usb::mounted_devices(&hive).map(|m| m.0).unwrap_or_default();
@@ -87,7 +94,7 @@ fn read_all(data: Vec<u8>) {
     });
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
-    let _ = accounts(&hive);
+    let _ = (accounts(&hive), machine_sid(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -128,6 +135,22 @@ proptest! {
         read_all(damage(system().to_vec(), flips));
     }
 
+    /// BAM's keys and values damaged: read without a panic.
+    #[test]
+    fn a_damaged_bam(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(system_win10().to_vec(), flips), &[])
+        {
+            for set in ControlSets::read(&hive).present {
+                for entry in bam(&hive, set).map(|b| b.0).unwrap_or_default() {
+                    let _ = device_path(&entry.program);
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_damaged_ntuser_hive(
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
@@ -162,5 +185,6 @@ proptest! {
         let text = String::from_utf8_lossy(&rest);
         let _ = (usb::device_ref(&text), usb::storage_name(&text), usb::vid_pid(&text));
         let _ = usb::serial("USBSTOR", &text);
+        let _ = device_path(&String::from_utf8_lossy(&rest));
     }
 }

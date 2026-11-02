@@ -52,6 +52,11 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `system::bam` (`BamEntry`, `Moderator`): when each user last ran each program as the Background
+  and Desktop Activity Moderators recorded it, from `Services\bam` and `Services\dam` in both
+  layouts (`State\UserSettings` and `UserSettings`), and `device_path`, which splits a
+  `\Device\HarddiskVolumeN\…` path into the device and the path on it; `sam::machine_sid`: the
+  computer's SID. (@YamatoSecurity)
 - `usb`: USB history. From `SYSTEM`, USB storage, USB and portable devices (`devices`, `Device`)
   with their names, IDs, serial numbers and device first install, driver last installed, last
   arrival and last removal times, and `MountedDevices` (`mounted_devices`, `MountTarget`, `device_ref`); from `SOFTWARE`,
