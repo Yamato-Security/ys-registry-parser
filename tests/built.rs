@@ -9,8 +9,9 @@ use ys_registry_parser::ntuser::{
     classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
 };
 use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
-use ys_registry_parser::sam::accounts;
+use ys_registry_parser::sam::{accounts, machine_sid};
 use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
+use ys_registry_parser::system::{Moderator, bam};
 use ys_registry_parser::{Data, Hive, RecoveredStatus, Source, Status, decode};
 
 /// 2022-02-08T21:03:52Z.
@@ -1835,4 +1836,163 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     );
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
+}
+
+/// BAM's data: the time a program last ran, then 16 bytes Windows writes after it.
+fn bam_data(when: u64) -> Vec<u8> {
+    let mut data = when.to_le_bytes().to_vec();
+    data.extend([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]);
+    data
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn bam_and_dam_keys_in_both_layouts() {
+    let user = "S-1-5-21-1-2-3-1001";
+    let new = format!(r"ControlSet001\Services\bam\State\UserSettings\{user}");
+    let old = r"ControlSet001\Services\bam\UserSettings\S-1-5-18";
+    let dam = format!(r"ControlSet001\Services\dam\State\UserSettings\{user}");
+    let dam_old = format!(r"ControlSet001\Services\dam\UserSettings\{user}");
+    let mut t = Tree::default();
+    t.dword(&new, "Version", 1)
+        .dword(&new, "SequenceNumber", 7)
+        .set(
+            &new,
+            r"\Device\HarddiskVolume3\Windows\explorer.exe",
+            3,
+            &bam_data(WHEN),
+        )
+        .set(
+            &new,
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+            3,
+            &bam_data(WHEN + 1),
+        )
+        // damaged: fewer than 8 bytes, a string; their bytes kept, no time guessed
+        .set(
+            &new,
+            r"\Device\HarddiskVolume3\Tools\short.exe",
+            3,
+            &[1, 2, 3],
+        )
+        .sz(&new, r"\Device\HarddiskVolume3\Tools\text.exe", "12345678")
+        .set(
+            old,
+            r"\Device\HarddiskVolume2\Windows\System32\svchost.exe",
+            3,
+            &bam_data(WHEN + 2),
+        )
+        .set(
+            &dam,
+            r"\Device\HarddiskVolume3\Windows\notepad.exe",
+            3,
+            &bam_data(WHEN + 3),
+        )
+        .dword(&dam_old, "Version", 1)
+        .dword("Select", "Current", 1);
+    let hive = t.hive("ROOT");
+    let (entries, problems) = bam(&hive, 1).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let got: Vec<(Moderator, &str, &str, Option<u64>)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.moderator,
+                e.key_path.as_str(),
+                e.program.as_str(),
+                e.last_run,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                Moderator::Bam,
+                new.as_str(),
+                r"\Device\HarddiskVolume3\Windows\explorer.exe",
+                Some(WHEN)
+            ),
+            (
+                Moderator::Bam,
+                new.as_str(),
+                "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+                Some(WHEN + 1)
+            ),
+            (
+                Moderator::Bam,
+                new.as_str(),
+                r"\Device\HarddiskVolume3\Tools\short.exe",
+                None
+            ),
+            (
+                Moderator::Bam,
+                new.as_str(),
+                r"\Device\HarddiskVolume3\Tools\text.exe",
+                None
+            ),
+            (
+                Moderator::Bam,
+                old,
+                r"\Device\HarddiskVolume2\Windows\System32\svchost.exe",
+                Some(WHEN + 2)
+            ),
+            (
+                Moderator::Dam,
+                dam.as_str(),
+                r"\Device\HarddiskVolume3\Windows\notepad.exe",
+                Some(WHEN + 3)
+            ),
+        ]
+    );
+    assert_eq!(entries[0].user_sid, user);
+    assert_eq!(entries[4].user_sid, "S-1-5-18");
+    assert!(entries[0].key_last_written > 0 && !entries[0].replayed);
+    assert_eq!(
+        (
+            entries[2].problems.as_slice(),
+            entries[2].data_raw.as_deref()
+        ),
+        (
+            &["3 data bytes, fewer than the 8 of a time it last ran".to_owned()][..],
+            Some(&[1u8, 2, 3][..])
+        )
+    );
+    assert_eq!(entries[3].problems, ["is REG_SZ, not REG_BINARY"]);
+    assert_eq!(
+        entries[3].data_raw.as_deref(),
+        Some(&utf16z("12345678")[..])
+    );
+    assert!(entries[0].problems.is_empty() && entries[0].data_raw.is_none());
+    // another control set without these keys; a hive without any
+    assert!(bam(&hive, 2).is_none());
+    assert!(bam(&Tree::default().hive("ROOT"), 1).is_none());
+}
+
+#[test]
+fn machine_sid_from_the_end_of_account_v() {
+    let path = r"SAM\Domains\Account";
+    let sid = |subs: [u32; 4]| {
+        let mut b = vec![1, 4, 0, 0, 0, 0, 0, 5];
+        b.extend(subs.iter().flat_map(|s| s.to_le_bytes()));
+        b
+    };
+    let mut v = vec![0xaa; 40];
+    v.extend(sid([21, 1_760_460_187, 1_592_185_332, 161_725_925]));
+    let mut t = Tree::default();
+    t.set(path, "V", 3, &v);
+    assert_eq!(
+        machine_sid(&t.hive("ROOT")).as_deref(),
+        Some("S-1-5-21-1760460187-1592185332-161725925")
+    );
+    // not a domain SID at the end, too short, no V
+    for bad in [sid([32, 544, 0, 0]), vec![1, 4, 0, 0], Vec::new()] {
+        let mut t = Tree::default();
+        if bad.is_empty() {
+            t.at(path);
+        } else {
+            t.set(path, "V", 3, &bad);
+        }
+        assert_eq!(machine_sid(&t.hive("ROOT")), None);
+    }
 }
