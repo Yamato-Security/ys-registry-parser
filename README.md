@@ -91,6 +91,16 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   whether the sign-in screen hides it; its `Names` entry's RID and time (about when the account
   was made) are matched with it, and what disagrees is reported. `account_flag_names` names the
   flags. Password hashes are not read.
+- Microsoft Office in `NTUSER.DAT` (`office`): `office` gives, for each version (`16.0`, …) and
+  application, the documents and folders it opened last (`File MRU`, `Place MRU`, and each
+  Microsoft 365 account's `User MRU` lists; `mru_item` decodes an item's `[F…][T…][O…]*path`
+  into its flags, last-opened time and path), the documents whose editing or macros the user
+  enabled (`Security\Trusted Documents\TrustRecords`; `trust_record`: the time it was trusted
+  and the flags, `MACROS_ENABLED` when its macros were), the macro settings `VBAWarnings`,
+  `BlockContentExecutionFromInternet` and `AccessVBOM` (`setting_meaning` says what each number
+  means), and `Security\Trusted Locations` (its values, and each location's `Path` and other
+  values), the user's and those set by policy (`Software\Policies\Microsoft\Office`). Data that
+  doesn't decode keeps its bytes.
 - Autostart locations (`persistence`), one `Autostart` per program, DLL or package a value names
   (a list gives one each), with its `Mechanism` (`name`, and `attack_technique`: its MITRE
   ATT&CK technique, where one fits), key, value, data, program and arguments (`command_line`
@@ -200,6 +210,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
   tasks, lists, actions and times as a separate decoder built on yarp, every `Actions` value
   decoded to its last byte.
+- Office on the 7 public `NTUSER.DAT` hives with its lists (regipy's, Plaso's, notatin's and the
+  DFIR Artifact Museum's, Office 2010 to Microsoft 365): the same 326 `File MRU` and `Place MRU`
+  items (Microsoft 365 accounts' too), with the same paths and times, as dissect.target's Office
+  MRU parser (to its 2 µs: it converts times through floating point), the same 137 Office 2010
+  items as Plaso's `officemru`, to the 100 ns, and the same 10 trust records' times and flags as
+  dissect.target's trust record structure; the same 95 trusted locations as regipy reads.
 - Local accounts on 7 public `SAM` hives (regipy's and the DFIR Artifact Museum's, Windows 7 to
   11, Server 2012 R2 and 2022; 30 accounts): every `F` and `V` field the same as
   [dissect](https://github.com/fox-it/dissect.target)'s `user_F` and `user_V` structures give,
@@ -227,7 +243,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   session entries and `NoEncrypt`; recent
   documents whose list and values don't add up; a task cache built with real Windows 11 `Actions`
   and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
-  way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`); accounts
+  way round, and `Actions` cut short; regipy's `NTUSER.DAT` (Excel's lists) and Plaso's Windows 7
+  `NTUSER.DAT` (Word's lists, trust records, trusted locations); Office built with two versions,
+  a Microsoft 365 account, trust records with and without macros and cut short, macro settings
+  of the user and by policy, trusted locations with and without `Path`, and items without `*`,
+  with a time that isn't one or numbered twice; regipy's `SAM` (accounts, flags, times,
+  `Names`); accounts
   whose `F`, `V` and `Names` disagree or are cut short, with a password hint, a Microsoft account
   and `UserDontShowInLogonUI`; autostarts in regipy's `SYSTEM`, `NTUSER.DAT` and `UsrClass.dat`,
   and in built hives with one of each kind, `StartupApproved` entries enabled, disabled and
@@ -245,4 +266,5 @@ data cells the entry didn't write.
 Apache-2.0 (`LICENSE`). The transaction log replay comes from Yamato Security's
 [ys-shimcache-parser](https://github.com/Yamato-Security/ys-shimcache-parser) (Apache-2.0). The
 format is Maxim Suhanov's [Windows registry file format specification](https://github.com/msuhanov/regf)
-(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`).
+(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`),
+and Plaso's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`).

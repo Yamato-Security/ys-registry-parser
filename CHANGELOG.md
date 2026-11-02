@@ -52,3 +52,10 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `office` (`office`, `OfficeEntry`, `OfficeList`, `mru_item`, `trust_record`, `setting_meaning`,
+  `MACROS_ENABLED`): Microsoft Office in `NTUSER.DAT`: each version's and application's
+  `File MRU` and `Place MRU` (with Microsoft 365 accounts' `User MRU`), each item's path and
+  last-opened time; `Trusted Documents\TrustRecords`, with when each document was trusted and
+  whether its macros were enabled; and the macro settings (`VBAWarnings`,
+  `BlockContentExecutionFromInternet`, `AccessVBOM`) and `Trusted Locations` of the user and by
+  policy. (@YamatoSecurity)

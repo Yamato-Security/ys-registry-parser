@@ -8,6 +8,7 @@ use proptest::prelude::*;
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
+use ys_registry_parser::office::{mru_item, office, trust_record};
 use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
@@ -35,6 +36,22 @@ fn system() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// Plaso's Windows 7 NTUSER.DAT, with Office lists and trust records, unpacked once.
+fn plaso_win7() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| {
+        let path = format!(
+            "{}/tests/fixtures/plaso/NTUSER-WIN7.DAT.gz",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut data = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_end(&mut data)
+            .unwrap();
+        data
+    })
 }
 
 /// Flip bytes of `data` past its base block.
@@ -67,7 +84,7 @@ fn read_all(data: Vec<u8>) {
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
-    let _ = accounts(&hive);
+    let _ = (accounts(&hive), office(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -114,6 +131,24 @@ proptest! {
     ) {
         read_all(damage(ntuser().to_vec(), flips));
     }
+
+    /// Office's keys and values damaged: read without a panic.
+    #[test]
+    fn damaged_office_keys(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(plaso_win7().to_vec(), flips), &[])
+        {
+            let _ = office(&hive);
+        }
+    }
+
+    /// Office MRU items of any text: decoded or refused.
+    #[test]
+    fn office_mru_items(text in "(\\[[FTO]?[0-9A-Fa-fé]{0,20}\\]?){0,4}\\*?.{0,8}") {
+        let _ = mru_item(&text);
+    }
 }
 
 proptest! {
@@ -138,5 +173,6 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (trust_record(&rest), mru_item(&String::from_utf8_lossy(&rest)));
     }
 }
