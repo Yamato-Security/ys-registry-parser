@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Validate LSA string headers and Source OS calendar dates; report incomplete profile FILETIMEs
+  instead of silently dropping them. Reuse the validated SAM machine-SID reader. (@YamatoSecurity)
 - Preserve diagnostics and original bytes for malformed installed-program values, including
   zero-byte values and WSL's parent default-distribution value; retain replay provenance for
   that parent value and validate four-component, 16-bit package versions. (@YamatoSecurity)
@@ -110,3 +112,12 @@ First version. (@YamatoSecurity)
   (@YamatoSecurity)
 
 - Remote-access MRU matching follows registry Unicode case comparisons, and stored password presence is checked without exposing malformed password bytes in diagnostic output. (@YamatoSecurity)
+- `system_info`: what a timeline needs to know about a system. `system` (`SystemDetails`): a
+  `SYSTEM` hive's computer name, host name and DNS domain, time zone (`TimeZone`, with
+  `StandardStart` and `DaylightStart` decoded as the kernel's `TIME_FIELDS` by `TransitionDate`),
+  last shutdown, processor architecture, code pages, and the versions it was upgraded from
+  (`PreviousVersion`); `software` (`SoftwareDetails`): a `SOFTWARE` hive's Windows version
+  (`WindowsVersion`), profiles (`Profile`, with load and unload times) and last signed-in user
+  (`LastLoggedOn`); `machine_sid`: a `SAM` hive's computer SID; `domains` (`Domains`): the account
+  and primary domains, DNS names, domain GUID and computer account SID in a `SECURITY` hive's LSA
+  policy; `sid` and `utc_offset`. (@YamatoSecurity)
