@@ -5,6 +5,7 @@
 
 use std::fmt::Write as _;
 
+use ys_registry_parser::app_history::{self, App, AppTrace};
 use ys_registry_parser::installed::{self, Program, ProgramSource, Scope};
 use ys_registry_parser::ntuser::{
     classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
@@ -4543,4 +4544,323 @@ fn word_wheel_search_terms_keep_damaged_utf16_bytes() {
         assert!(!entries[0].problems.is_empty(), "damage silently discarded");
         assert_eq!(entries[0].data_raw.as_ref(), Some(&bytes));
     }
+}
+
+/// Each trace as `app item position | path | value`, with what else is set.
+fn traces(records: &[AppTrace]) -> Vec<String> {
+    let text = |t: &Option<String>| t.clone().unwrap_or_else(|| "-".to_owned());
+    records
+        .iter()
+        .map(|t| {
+            let mut line = format!(
+                "{} {} {} | {} | {}",
+                t.app.name(),
+                t.item,
+                t.mru_position
+                    .map_or_else(|| "-".to_owned(), |n| n.to_string()),
+                text(&t.path),
+                text(&t.value),
+            );
+            if t.first_used.is_some() {
+                line.push_str(" first_used");
+            }
+            for (k, v) in &t.details {
+                let _ = write!(line, " {k}={v}");
+            }
+            if t.data_raw.is_some() {
+                line.push_str(" raw");
+            }
+            for p in &t.problems {
+                let _ = write!(line, " [{p}]");
+            }
+            line
+        })
+        .collect()
+}
+
+/// UTF-16 strings, each ended by a NUL, and a NUL after the last: a 7-Zip history list.
+fn utf16_list(items: &[&str]) -> Vec<u8> {
+    let mut b: Vec<u8> = items.iter().flat_map(|i| utf16z(i)).collect();
+    b.extend([0, 0]);
+    b
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn traces_of_each_application() {
+    // a byte past the last whole UTF-16 code unit: the list as far as it goes, and its bytes
+    let mut odd = utf16_list(&[r"C:\Users\alice\Desktop"]);
+    odd.push(0x41);
+    let reader = r"Software\Adobe\Acrobat Reader\DC\AVGeneral";
+    let acrobat = r"Software\Adobe\Adobe Acrobat\2017\AVGeneral";
+    let business = r"Software\Microsoft\OneDrive\Accounts\Business1";
+    let mut t = Tree::default();
+    t.dword(r"Software\Sysinternals\PsExec", "EulaAccepted", 1)
+        .dword(r"Software\Sysinternals\Process Explorer", "EulaAccepted", 1)
+        .dword(
+            r"Software\Sysinternals\Process Explorer",
+            "ShowLowerpane",
+            0,
+        )
+        .sz(r"Software\Sysinternals\ProcDump", "EulaAccepted", "1")
+        .dword(r"Software\Sysinternals\Autoruns", "Theme", 0)
+        // out of order, and a value that isn't a position
+        .sz(
+            r"Software\WinRAR\ArcHistory",
+            "1",
+            r"C:\Users\alice\old.rar",
+        )
+        .sz(
+            r"Software\WinRAR\ArcHistory",
+            "0",
+            r"C:\Users\alice\loot.rar",
+        )
+        .sz(r"Software\WinRAR\ArcHistory", "Last", "x")
+        .sz(
+            r"Software\WinRAR\DialogEditHistory\ExtrPath",
+            "0",
+            r"C:\ProgramData\x",
+        )
+        .set(
+            r"Software\7-Zip\Compression",
+            "ArcHistory",
+            3,
+            &utf16_list(&[r"C:\Users\alice\out.7z", r"D:\stage.zip"]),
+        )
+        .set(
+            r"Software\7-Zip\Extraction",
+            "PathHistory",
+            3,
+            &utf16_list(&[r"C:\Temp\x\"]),
+        )
+        .set(r"Software\7-Zip\FM", "FolderHistory", 3, &odd)
+        .set(r"Software\7-Zip\FM", "CopyHistory", 3, &utf16_list(&[]))
+        .sz(r"Software\7-Zip\FM", "PanelPath0", r"\\server\share\")
+        .sz(r"Software\7-Zip\FM", "PanelPath1", "")
+        .sz(
+            r"Software\Nico Mak Computing\WinZip\filemenu",
+            "filemenu2",
+            r"C:\b.zip",
+        )
+        .sz(
+            r"Software\Nico Mak Computing\WinZip\filemenu",
+            "filemenu1",
+            r"C:\a.zip",
+        )
+        .sz(
+            r"Software\Nico Mak Computing\WinZip\extract",
+            "extract1",
+            r"C:\x",
+        )
+        .sz(
+            r"Software\Nico Mak Computing\WinZip\mru\archives",
+            "0",
+            r"C:\a.zip",
+        )
+        .sz(business, "UserEmail", "alice@example.com")
+        .sz(business, "UserFolder", r"C:\Users\alice\OneDrive - Example")
+        .sz(business, "DisplayName", "Example")
+        .sz(
+            business,
+            "ConfiguredTenantId",
+            "00000000-0000-0000-0000-000000000001",
+        )
+        .sz(
+            &format!(r"{business}\ScopeIdToMountPointPathCache"),
+            "4a0f2c7d1e",
+            r"C:\Users\alice\Example\Finance - Documents",
+        )
+        .dword(
+            &format!(r"{business}\Tenants\Example"),
+            r"C:\Users\alice\Example\Finance - Documents",
+            1,
+        )
+        // c2 before c1; c3 with only its path as bytes
+        .sz(
+            &format!(r"{reader}\cRecentFiles\c2"),
+            "tDIText",
+            "/C/old.pdf",
+        )
+        .sz(
+            &format!(r"{reader}\cRecentFiles\c1"),
+            "tDIText",
+            "/C/Users/alice/new.pdf",
+        )
+        .sz(
+            &format!(r"{reader}\cRecentFiles\c1"),
+            "tFileName",
+            "new.pdf",
+        )
+        .dword(&format!(r"{reader}\cRecentFiles\c1"), "uFileSize", 1234)
+        .set(
+            &format!(r"{reader}\cRecentFiles\c1"),
+            "sDate",
+            3,
+            b"D:20220208210352Z\0",
+        )
+        .set(
+            &format!(r"{reader}\cRecentFiles\c3"),
+            "sDI",
+            3,
+            b"/D/x.pdf\0",
+        )
+        .sz(
+            &format!(r"{reader}\cRecentFolders\c1"),
+            "tDIText",
+            "/C/Users/alice/",
+        )
+        .set(
+            &format!(r"{acrobat}\cRecentFiles\c1"),
+            "sDI",
+            3,
+            &[0xff, 0xfe, 0],
+        )
+        .sz(
+            r"Software\TeamViewer",
+            "BuddyLoginName",
+            "alice@example.com",
+        )
+        .multi(
+            r"Software\TeamViewer",
+            "FT_Start_Directories",
+            &[r"123456789?C:\Users\alice\|D:\"],
+        )
+        .sz(r"Software\TeamViewer\Version9", "Username", "alice")
+        .sz(r"Software\TeamViewer\MultiMedia", "VideoSrc", "x")
+        .sz(
+            r"Software\Piriform\CCleaner",
+            "UpdateKey",
+            "02/08/2022 09:03:52 PM",
+        )
+        .sz(r"Software\Piriform\CCleaner", "(App)Cookies", "True");
+    let (records, problems) = app_history::ntuser(&t.hive("ROOT"));
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        traces(&records),
+        [
+            "Sysinternals PsExec - | - | 1 first_used",
+            "Sysinternals Process Explorer - | - | 1",
+            "Sysinternals ProcDump - | - | 1 first_used",
+            "Sysinternals Autoruns - | - | -",
+            r"WinRAR ArcHistory 0 | C:\Users\alice\loot.rar | -",
+            r"WinRAR ArcHistory 1 | C:\Users\alice\old.rar | -",
+            r"WinRAR ExtrPath 0 | C:\ProgramData\x | -",
+            r"7-Zip ArcHistory 0 | C:\Users\alice\out.7z | -",
+            r"7-Zip ArcHistory 1 | D:\stage.zip | -",
+            r"7-Zip PathHistory 0 | C:\Temp\x\ | -",
+            "7-Zip FolderHistory - | - | - raw [is not a list of valid UTF-16 strings]",
+            r"7-Zip FolderHistory 0 | C:\Users\alice\Desktop | -",
+            r"7-Zip PanelPath0 - | \\server\share\ | -",
+            r"WinZip filemenu 0 | C:\a.zip | -",
+            r"WinZip filemenu 1 | C:\b.zip | -",
+            r"WinZip extract 0 | C:\x | -",
+            r"WinZip mru\archives 0 | C:\a.zip | -",
+            r"OneDrive Business1 - | C:\Users\alice\OneDrive - Example | alice@example.com DisplayName=Example ConfiguredTenantId=00000000-0000-0000-0000-000000000001",
+            r"OneDrive Business1\ScopeIdToMountPointPathCache - | C:\Users\alice\Example\Finance - Documents | 4a0f2c7d1e",
+            r"OneDrive Business1\Tenants\Example - | C:\Users\alice\Example\Finance - Documents | 1",
+            "Adobe Acrobat Reader cRecentFiles 0 | /C/Users/alice/new.pdf | - Version=DC tFileName=new.pdf uFileSize=1234 sDate=D:20220208210352Z",
+            "Adobe Acrobat Reader cRecentFiles 1 | /C/old.pdf | - Version=DC",
+            "Adobe Acrobat Reader cRecentFiles 2 | /D/x.pdf | - Version=DC",
+            "Adobe Acrobat Reader cRecentFolders 0 | /C/Users/alice/ | - Version=DC",
+            "Adobe Acrobat cRecentFiles 0 | - | - Version=2017 raw [sDI: is not UTF-8 text]",
+            "TeamViewer BuddyLoginName - | - | alice@example.com",
+            r"TeamViewer FT_Start_Directories 0 | - | 123456789?C:\Users\alice\|D:\",
+            "TeamViewer Username - | - | alice",
+            "CCleaner UpdateKey - | - | 02/08/2022 09:03:52 PM",
+            "CCleaner (App)Cookies - | - | True",
+        ]
+    );
+    let psexec = &records[0];
+    assert_eq!(
+        (
+            psexec.first_used,
+            psexec.key_last_written,
+            psexec.key_path.as_str()
+        ),
+        (Some(WHEN), WHEN, r"Software\Sysinternals\PsExec")
+    );
+    assert_eq!(psexec.value_name, None);
+    assert_eq!(records[4].value_name.as_deref(), Some("0"));
+    assert_eq!(records[10].data_raw.as_deref(), Some(&odd[..]));
+    assert_eq!(records[24].data_raw.as_deref(), Some(&[0xff, 0xfe, 0][..]));
+    assert_eq!(records[26].key_path, r"Software\TeamViewer");
+    assert_eq!(records[27].key_path, r"Software\TeamViewer\Version9");
+    assert!(records.iter().all(|r| !r.replayed));
+    assert!(records.iter().any(|r| r.app == App::CCleaner));
+    // nothing to read
+    assert_eq!(
+        app_history::ntuser(&Tree::default().hive("ROOT")),
+        (Vec::new(), Vec::new())
+    );
+}
+
+#[test]
+fn declined_or_damaged_eulas_do_not_claim_first_use() {
+    use ys_registry_parser::app_history::ntuser;
+    for (kind, bytes) in [
+        (4, 0u32.to_le_bytes().to_vec()),
+        (4, vec![]),
+        (1, vec![b'1', 0, 0, 0, 0xff]),
+    ] {
+        let mut t = Tree::default();
+        t.set(
+            r"Software\Sysinternals\PsExec",
+            "EulaAccepted",
+            kind,
+            &bytes,
+        );
+        let (traces, _) = ntuser(&t.hive("ROOT"));
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].first_used, None);
+    }
+}
+
+#[test]
+fn application_history_reports_zero_length_typed_values() {
+    use ys_registry_parser::app_history::ntuser;
+    let mut t = Tree::default();
+    t.set(r"Software\Piriform\CCleaner", "Damaged", 4, &[]);
+    let (traces, _) = ntuser(&t.hive("ROOT"));
+    assert_eq!(traces.len(), 1);
+    assert!(
+        traces[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("REG_DWORD of 0 bytes"))
+    );
+    assert_eq!(traces[0].data_raw, Some(vec![]));
+}
+
+#[test]
+fn application_history_keeps_empty_damaged_multistrings() {
+    use ys_registry_parser::app_history::ntuser;
+    let mut t = Tree::default();
+    t.set(r"Software\TeamViewer", "Recent", 7, &[0x41]);
+    let (traces, _) = ntuser(&t.hive("ROOT"));
+    assert_eq!(traces.len(), 1);
+    assert!(
+        traces[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("not valid UTF-16"))
+    );
+    assert_eq!(traces[0].data_raw, Some(vec![0x41]));
+}
+
+#[test]
+fn sevenzip_history_validates_the_registry_type() {
+    use ys_registry_parser::app_history::ntuser;
+    let mut t = Tree::default();
+    t.set(
+        r"Software\7-Zip\Compression",
+        "ArcHistory",
+        4,
+        &1u32.to_le_bytes(),
+    );
+    let (traces, _) = ntuser(&t.hive("ROOT"));
+    assert!(
+        traces
+            .iter()
+            .any(|t| !t.problems.is_empty() && t.data_raw.is_some())
+    );
 }

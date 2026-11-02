@@ -5,6 +5,9 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Application history retains zero-length malformed values and empty damaged multi-strings,
+  validates 7-Zip history types, and avoids claiming first use for declined or damaged EULAs.
+  (@YamatoSecurity)
 - Preserve damaged WordWheelQuery bytes and report odd UTF-16 lengths or nonzero data after
   the terminator instead of silently discarding them. (@YamatoSecurity)
 - Validate LSA string headers and Source OS calendar dates; report incomplete profile FILETIMEs
@@ -128,3 +131,8 @@ First version. (@YamatoSecurity)
   Paint's and WordPad's recent files, and Windows XP's `ACMru`, each entry in its list's order.
   `ntuser::mru_items` and `ntuser::mru_list_items` order a key's values by its `MRUListEx` or
   `MRUList`. (@YamatoSecurity)
+- `app_history` (`AppTrace`, `App`): traces third-party tools leave in `NTUSER.DAT`
+  (`app_history::ntuser`): Sysinternals tools whose licence the user accepted (with when they
+  first ran), WinRAR's, 7-Zip's and WinZip's archive and folder history, OneDrive accounts and
+  their synced folders, Adobe Acrobat's and Reader's recent files and folders, and TeamViewer's and
+  CCleaner's values; list entries with their positions. (@YamatoSecurity)

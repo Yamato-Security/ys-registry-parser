@@ -202,6 +202,21 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
     (`ActivatableClasses\…\DebugInformation`). With the machine's `MachineClasses` (read from
     `SOFTWARE`), each says whether it overrides the machine's registration of the same class or
     command.
+- Traces third-party tools leave in `NTUSER.DAT` (`app_history::ntuser`), one `AppTrace` per
+  tool, list entry, account or setting, with its `App`, key, value and last-write time: each
+  Sysinternals tool whose licence the user accepted (`Software\Sysinternals\<tool>`; its key's
+  last-write time gives a first-use estimate, `first_used`, when the key holds only
+  a readable `EulaAccepted` set to `1`; corroborate execution separately); WinRAR's archives opened and archive names and extraction folders typed
+  (`ArcHistory`, `DialogEditHistory\ArcName`, `ExtrPath`); 7-Zip's archives made, extraction
+  folders and folders browsed and copied to (`Compression\ArcHistory`, `Extraction\PathHistory`,
+  `FM\FolderHistory`, `FM\CopyHistory`: lists of UTF-16 strings) and its panels' last folders;
+  WinZip's `filemenu`, `extract` and `mru\archives`; each OneDrive account's e-mail address,
+  folder and names (`Accounts\<account>`), and its synced libraries and folders
+  (`ScopeIdToMountPointPathCache`, `Tenants\<tenant>`); Adobe Acrobat's and Reader's recent files
+  and folders (`AVGeneral\cRecentFiles`, `cRecentFolders`), with their file names, sizes and
+  dates; and every value TeamViewer and CCleaner keep in `Software\TeamViewer` and
+  `Software\Piriform\CCleaner`. A list's entries carry their positions (0 the most recent); a
+  list that doesn't decode keeps its bytes.
 - Installed software (`installed`), one `Program` per key, with its `ProgramSource`, `Scope`
   (`machine` or `user`), key and last-write time, and the problems its values have (their bytes
   kept): `software` reads `SOFTWARE`'s `Uninstall` entries (and `Wow6432Node`'s: name, version,
@@ -393,6 +408,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `ntuser_persistence`, and the same (none) `AppInit_DLLs` and IFEO debuggers as its
   `appinitdlls` and `image_file_execution_options`; on regipy's `SYSTEM`, the same LSA packages
   as its `lsa_packages`.
+- Third-party tools' traces on 19 public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's, Windows 7 to 11; 477 traces): the same 129 Sysinternals
+  tools (name, time, `EulaAccepted`) as regipy's `sysinternals`; the same 40 WinRAR entries as
+  regipy's `winrar_plugin` and, list by list (10), as Plaso's `winrar_mru`; the same CCleaner
+  values (52) and `UpdateKey`s as Plaso's `ccleaner`; and the same 7-Zip lists (201 entries),
+  Adobe Reader recent files, OneDrive accounts and TeamViewer values as a reader built on yarp.
 - Installed software on 10 public `SOFTWARE` and 19 public `NTUSER.DAT` hives (regipy's, Plaso's,
   notatin's, artemis' and the DFIR Artifact Museum's, Windows 7 to 11, Server 2012 R2 and 2022;
   1,731 records): the same 434 `Uninstall` entries (key, time and every value read) as regipy's
@@ -463,3 +484,5 @@ format is Maxim Suhanov's [Windows registry file format specification](https://g
 (CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`),
 and Plaso's and notatin's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`,
 `tests/fixtures/notatin/LICENSE`).
+
+Application-history tests also use the DFIR Artifact Museum's hives under MIT (`tests/fixtures/museum/LICENSE`).
