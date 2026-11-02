@@ -35,6 +35,7 @@ mod recover;
 pub mod sam;
 pub mod software;
 pub mod system;
+pub mod usb;
 
 use std::path::Path;
 

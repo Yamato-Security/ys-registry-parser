@@ -57,3 +57,9 @@ First version. (@YamatoSecurity)
   layouts (`State\UserSettings` and `UserSettings`), and `device_path`, which splits a
   `\Device\HarddiskVolumeN\…` path into the device and the path on it; `sam::machine_sid`: the
   computer's SID. (@YamatoSecurity)
+- `usb`: USB history. From `SYSTEM`, USB storage, USB and portable devices (`devices`, `Device`)
+  with their names, IDs, serial numbers and device first install, driver last installed, last
+  arrival and last removal times, and `MountedDevices` (`mounted_devices`, `MountTarget`, `device_ref`); from `SOFTWARE`,
+  `Windows Portable Devices` (`portable_devices`) and ReadyBoost's `EMDMgmt` (`ready_boost`);
+  from `NTUSER.DAT`, `MountPoints2` (`mount_points`); `history` joins them into one record per
+  device and volume, with the users who had it. (@YamatoSecurity)
