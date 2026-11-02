@@ -1,6 +1,7 @@
 //! `NTUSER.DAT` hives: Explorer's recent documents (`RecentDocs`, in the order of its
-//! `MRUListEx`), the programs and shortcuts a user started from Explorer (`UserAssist`), and the
-//! name of the profile a hive belongs to.
+//! `MRUListEx`), the programs and shortcuts a user started from Explorer (`UserAssist`), the
+//! name of the profile a hive belongs to; and with `UsrClass.dat` hives, the programs a user ran
+//! with the names their version resources give (`MuiCache`).
 //!
 //! A `RecentDocs` value is the item's name (UTF-16, up to its NUL), then a shell item list
 //! whose first item is the file entry of the shortcut Windows made in the `Recent` folder: an
@@ -13,11 +14,18 @@
 //! and later) data is 72 bytes: a session number, the run count, the focus count and time (ms),
 //! and from offset `0x3C` the FILETIME of the last run. Version 3 (Windows 2000 to Vista) is 16
 //! bytes: a session number, the run count plus 5, and the FILETIME of the last run.
+//!
+//! `MuiCache` is in `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell\MuiCache`,
+//! Windows Vista and later) and in `NTUSER.DAT` (`Software\Microsoft\Windows\ShellNoRoam\MUICache`,
+//! Windows XP). Windows 8 and later write two values per program, `<path>.FriendlyAppName` and
+//! `<path>.ApplicationCompany`; Windows XP and 7 one, `<path>`, the friendly name. `LangID` is the
+//! language of the strings, and values named `@<file>,-<number>` are resource strings the shell
+//! cached (`@shell32.dll,-22019`), not programs.
 
-use crate::bytes::{u16_at, u32_at, u64_at, utf16_units};
+use crate::bytes::{u16_at, u32_at, u64_at, upcase_name, utf16_units};
 use crate::data::{Data, ValueType, decode, filetime};
 use crate::hive::{Hive, Key, Status, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Where Explorer keeps the recent documents, under the hive's root.
 pub const RECENT_DOCS: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs";
@@ -950,6 +958,171 @@ pub fn user_assist_settings(hive: &Hive) -> UserAssistSettings {
         no_instrumentation: dword(r"Policies\Explorer", "NoInstrumentation"),
         no_log: dword(r"Explorer\UserAssist\Settings", "NoLog"),
         no_encrypt: dword(r"Explorer\UserAssist\Settings", "NoEncrypt"),
+    }
+}
+
+/// Where Windows Vista and later keep `MuiCache`, under a `UsrClass.dat` hive's root.
+pub const MUI_CACHE: &str = r"Local Settings\Software\Microsoft\Windows\Shell\MuiCache";
+/// Where Windows XP keeps it, under an `NTUSER.DAT` hive's root.
+pub const MUI_CACHE_XP: &str = r"Software\Microsoft\Windows\ShellNoRoam\MUICache";
+/// The keys `mui_cache` reads: also the Vista key under `Software\Classes`, as an `NTUSER.DAT`
+/// merged with its `UsrClass.dat` has it.
+const MUI_CACHE_KEYS: [&str; 3] = [
+    MUI_CACHE,
+    r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache",
+    MUI_CACHE_XP,
+];
+/// The suffixes of a program's values (Windows 8 and later).
+const FRIENDLY_APP_NAME: &str = ".FriendlyAppName";
+const APPLICATION_COMPANY: &str = ".ApplicationCompany";
+
+/// One program in `MuiCache`: its path, and the name and company Windows read from its version
+/// resources, joined from its values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MuiCacheEntry {
+    /// The `MuiCache` key it is in, under the hive's root: [`MUI_CACHE`], the same under
+    /// `Software\Classes`, or [`MUI_CACHE_XP`].
+    pub key_path: &'static str,
+    /// When that key was last written (FILETIME): the latest change to any of its programs.
+    pub key_last_written: u64,
+    /// The program's path: the value's name without `.FriendlyAppName` or
+    /// `.ApplicationCompany`.
+    pub path: String,
+    /// `<path>.FriendlyAppName`'s text, or `<path>`'s (Windows XP and 7).
+    pub friendly_app_name: Option<String>,
+    /// `<path>.ApplicationCompany`'s text.
+    pub application_company: Option<String>,
+    /// The friendly name value's bytes, when they aren't text that decodes cleanly.
+    pub friendly_app_name_raw: Option<Vec<u8>>,
+    /// The company value's bytes, when they aren't text that decodes cleanly.
+    pub application_company_raw: Option<Vec<u8>>,
+    /// Whether the transaction logs' replay wrote one of its values (the key itself is
+    /// rewritten whenever any value changes, so it doesn't count).
+    pub replayed: bool,
+    /// What couldn't be read.
+    pub problems: Vec<String>,
+}
+
+/// The `MuiCache` of a user hive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MuiCache {
+    /// One per program, in the order of its first value; a program whose values repeat a field
+    /// (both forms of a name) gets one per value of it.
+    pub entries: Vec<MuiCacheEntry>,
+    /// How many `@<file>,-<number>` values there are: resource strings, not programs, left out.
+    pub resource_strings: usize,
+    /// What keeps keys or values from being read.
+    pub problems: Vec<String>,
+}
+
+/// The programs of `hive`'s `MuiCache` keys ([`MUI_CACHE`], the same under `Software\Classes`,
+/// then [`MUI_CACHE_XP`]), without `LangID` and the resource strings. `None` when it has none of
+/// them.
+#[must_use]
+pub fn mui_cache(hive: &Hive) -> Option<MuiCache> {
+    let mut found = false;
+    let mut cache = MuiCache::default();
+    for key_path in MUI_CACHE_KEYS {
+        let Some(key) = hive.key(key_path) else {
+            continue;
+        };
+        found = true;
+        let (values, why) = key.values();
+        cache
+            .problems
+            .extend(why.into_iter().map(|w| format!("{key_path}: {w}")));
+        let template = MuiCacheEntry {
+            key_path,
+            key_last_written: key.last_written(),
+            ..MuiCacheEntry::default()
+        };
+        // each program's (its path in upper case) latest entry, and which of its two fields
+        // (name, company) a value has given
+        let mut latest: HashMap<String, (usize, [bool; 2])> = HashMap::new();
+        for value in &values {
+            let name = value.name();
+            if name.starts_with('@') {
+                cache.resource_strings += 1;
+                continue;
+            }
+            if name.eq_ignore_ascii_case("LangID") {
+                continue;
+            }
+            let (path, company) = match strip_suffix(&name, APPLICATION_COMPANY) {
+                Some(path) => (path, true),
+                None => (
+                    strip_suffix(&name, FRIENDLY_APP_NAME).unwrap_or(&name),
+                    false,
+                ),
+            };
+            let field = usize::from(company);
+            let comparison_key = upcase_name(path);
+            let at = match latest.get_mut(&comparison_key) {
+                Some((at, given)) if !given[field] => {
+                    given[field] = true;
+                    *at
+                }
+                _ => {
+                    cache.entries.push(MuiCacheEntry {
+                        path: path.to_owned(),
+                        ..template.clone()
+                    });
+                    let mut given = [false; 2];
+                    given[field] = true;
+                    latest.insert(comparison_key, (cache.entries.len() - 1, given));
+                    cache.entries.len() - 1
+                }
+            };
+            let entry = &mut cache.entries[at];
+            let (text, raw, why) = string_value(value);
+            let field = if company {
+                entry.application_company = text;
+                entry.application_company_raw = raw;
+                "ApplicationCompany"
+            } else {
+                entry.friendly_app_name = text;
+                entry.friendly_app_name_raw = raw;
+                "FriendlyAppName"
+            };
+            entry
+                .problems
+                .extend(why.map(|why| format!("{field}: {why}")));
+            entry.replayed |= value.status() == Status::Replayed;
+        }
+    }
+    found.then_some(cache)
+}
+
+/// `name` without `suffix`, in any case.
+fn strip_suffix<'n>(name: &'n str, suffix: &str) -> Option<&'n str> {
+    let cut = name.len().checked_sub(suffix.len())?;
+    let (head, tail) = (name.get(..cut)?, name.get(cut..)?);
+    tail.eq_ignore_ascii_case(suffix).then_some(head)
+}
+
+/// A string value's text; its bytes when they aren't text that decodes cleanly (another type,
+/// invalid UTF-16, not read whole); and why.
+fn string_value(value: &Value) -> (Option<String>, Option<Vec<u8>>, Option<String>) {
+    let (bytes, read_problem) = value.read_data();
+    if let Some(why) = read_problem {
+        return (None, Some(bytes), Some(why));
+    }
+    let (text, lossy) = match decode(value.data_type(), &bytes) {
+        Data::Text { value, lossy } => (value, lossy),
+        // a string written as a multi-string: its one string
+        Data::MultiText { values, lossy } if values.len() <= 1 => {
+            (values.into_iter().next().unwrap_or_default(), lossy)
+        }
+        _ => {
+            let why = format!("is {}, not a string", value.value_type().name());
+            return (None, Some(bytes), Some(why));
+        }
+    };
+    if lossy {
+        let why = "is not valid UTF-16: decoded lossily".to_owned();
+        (Some(text), Some(bytes), Some(why))
+    } else {
+        (Some(text), None, None)
     }
 }
 

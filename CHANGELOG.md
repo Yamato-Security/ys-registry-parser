@@ -4,6 +4,12 @@
 
 First version. (@YamatoSecurity)
 
+### Fixed
+- Keep distinct Unicode registry names and MuiCache paths separate when uppercasing would
+  expand one character into several, while retaining ordinary case-insensitive joins. This
+  prevents incorrect key/value lookups and metadata being joined to a different program.
+  (@YamatoSecurity)
+
 ### Added
 - `Hive`: a hive's base block (`Header`), its keys and values; `Hive::walk` (every key, depth
   first, each once, with its path) and `Hive::key` (a key by path, in any case).
@@ -52,6 +58,10 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `ntuser::mui_cache` (`MuiCache`, `MuiCacheEntry`, `MUI_CACHE`, `MUI_CACHE_XP`): the programs a
+  user ran with the names and companies Windows read from their version resources, from
+  `UsrClass.dat` (Vista and later) and `NTUSER.DAT` (XP), each program's values joined, without
+  `LangID` and the cached resource strings. (@YamatoSecurity)
 - `shellbags`: the `BagMRU` trees of `UsrClass.dat` and `NTUSER.DAT` (`shell_bags`, `ShellBag`,
   `LOCATIONS`: `Shell` and Windows XP's `ShellNoRoam`, and the 32-bit Explorer's under
   `Wow6432Node`): every item from the top of each tree down, in `MRUListEx` order, with its

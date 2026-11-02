@@ -154,14 +154,19 @@ fn nk(name: &str, parent: u32, subkeys: (u32, u32), values: (u32, u32), flags: u
 }
 
 fn vk(name: &str, kind: u32, len: u32, offset: u32) -> Vec<u8> {
+    let raw_name = if name.is_ascii() {
+        name.as_bytes().to_vec()
+    } else {
+        name.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    };
     let mut vk = vec![0u8; 0x14];
     vk[..2].copy_from_slice(b"vk");
-    vk[2..4].copy_from_slice(&(name.len() as u16).to_le_bytes());
+    vk[2..4].copy_from_slice(&(raw_name.len() as u16).to_le_bytes());
     vk[4..8].copy_from_slice(&len.to_le_bytes());
     vk[8..12].copy_from_slice(&offset.to_le_bytes());
     vk[12..16].copy_from_slice(&kind.to_le_bytes());
-    vk[16..18].copy_from_slice(&1u16.to_le_bytes());
-    vk.extend(name.as_bytes());
+    vk[16..18].copy_from_slice(&u16::from(name.is_ascii()).to_le_bytes());
+    vk.extend(raw_name);
     vk
 }
 
@@ -2435,4 +2440,145 @@ fn a_shell_bag_subkey_that_loops_back_is_read_once() {
             "its subkey is a key already read (the hive's subkey lists loop): the items under it are not read again"
         ]
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn mui_cache_in_each_form() {
+    use ys_registry_parser::ntuser::{MUI_CACHE, MUI_CACHE_XP, MuiCacheEntry, mui_cache};
+    let mut lossy = utf16z("Ac");
+    lossy[2..4].copy_from_slice(&0xd800u16.to_le_bytes());
+    let mut t = Tree::default();
+    t.set(MUI_CACHE, "LangID", 3, &[9, 4])
+        // Windows 8 and later: two values per program, joined in any case
+        .sz(MUI_CACHE, r"C:\Tools\a.exe.FriendlyAppName", "A tool")
+        .sz(MUI_CACHE, r"c:\tools\A.EXE.applicationcompany", "Acme")
+        // Windows 7: the path alone; its friendly name is already given, so another entry
+        .sz(MUI_CACHE, r"C:\Tools\a.exe", "A tool, older")
+        .set(
+            MUI_CACHE,
+            r"%ProgramFiles%\x.exe.FriendlyAppName",
+            2,
+            &utf16z("Expanded"),
+        )
+        .sz(MUI_CACHE, "@shell32.dll,-22019", "Calculator")
+        // damaged: not a string; not valid UTF-16
+        .set(
+            MUI_CACHE,
+            r"C:\Tools\bin.exe.FriendlyAppName",
+            3,
+            &[1, 2, 3],
+        )
+        .set(MUI_CACHE, r"C:\Tools\bin.exe.ApplicationCompany", 1, &lossy);
+    let cache = mui_cache(&t.hive("S-1-5-21-1-2-3-1001_Classes")).unwrap();
+    assert_eq!((cache.resource_strings, cache.problems.len()), (1, 0));
+    let entry = |path: &str, name: Option<&str>, company: Option<&str>| MuiCacheEntry {
+        key_path: MUI_CACHE,
+        key_last_written: WHEN,
+        path: path.to_owned(),
+        friendly_app_name: name.map(str::to_owned),
+        application_company: company.map(str::to_owned),
+        ..MuiCacheEntry::default()
+    };
+    let mut bin = entry(r"C:\Tools\bin.exe", None, Some("A\u{fffd}"));
+    bin.friendly_app_name_raw = Some(vec![1, 2, 3]);
+    bin.application_company_raw = Some(lossy.clone());
+    bin.problems = vec![
+        "FriendlyAppName: is REG_BINARY, not a string".to_owned(),
+        "ApplicationCompany: is not valid UTF-16: decoded lossily".to_owned(),
+    ];
+    assert_eq!(
+        cache.entries,
+        [
+            entry(r"C:\Tools\a.exe", Some("A tool"), Some("Acme")),
+            entry(r"C:\Tools\a.exe", Some("A tool, older"), None),
+            entry(r"%ProgramFiles%\x.exe", Some("Expanded"), None),
+            bin,
+        ]
+    );
+
+    // Windows XP: NTUSER.DAT's ShellNoRoam, with resource strings
+    let mut t = Tree::default();
+    t.set(MUI_CACHE_XP, "LangID", 3, &[9, 4])
+        .sz(MUI_CACHE_XP, "@xpsp1res.dll,-11004", "Outlook Express")
+        .sz(
+            MUI_CACHE_XP,
+            r"@C:\WINDOWS\system32\SHELL32.dll,-9216",
+            "My Computer",
+        )
+        .sz(MUI_CACHE_XP, r"C:\WINDOWS\system32\notepad.exe", "Notepad");
+    let cache = mui_cache(&t.hive("ROOT")).unwrap();
+    assert_eq!(cache.resource_strings, 2);
+    assert_eq!(
+        cache.entries,
+        [MuiCacheEntry {
+            key_path: MUI_CACHE_XP,
+            ..entry(r"C:\WINDOWS\system32\notepad.exe", Some("Notepad"), None)
+        }]
+    );
+
+    // an empty key; no key
+    let mut t = Tree::default();
+    t.at(MUI_CACHE);
+    assert_eq!(mui_cache(&t.hive("ROOT")).map(|c| c.entries.len()), Some(0));
+    let mut t = Tree::default();
+    t.dword(r"Software\Microsoft\Windows\ShellNoRoam", "x", 1);
+    assert_eq!(mui_cache(&t.hive("ROOT")), None);
+}
+
+#[test]
+fn mui_cache_does_not_join_distinct_unicode_paths() {
+    use ys_registry_parser::ntuser::{MUI_CACHE, mui_cache};
+    let mut tree = Tree::default();
+    tree.sz(
+        MUI_CACHE,
+        r"C:\Tools\straße.exe.FriendlyAppName",
+        "Street tool",
+    )
+    .sz(
+        MUI_CACHE,
+        r"C:\Tools\STRASSE.EXE.ApplicationCompany",
+        "Another company",
+    )
+    .sz(MUI_CACHE, r"C:\Tools\café.exe.FriendlyAppName", "Cafe tool")
+    .sz(
+        MUI_CACHE,
+        r"c:\tools\CAFÉ.EXE.ApplicationCompany",
+        "Cafe company",
+    );
+    let cache = mui_cache(&tree.hive("ROOT")).unwrap();
+    assert_eq!(cache.entries.len(), 3);
+    assert_eq!(cache.entries[0].path, r"C:\Tools\straße.exe");
+    assert_eq!(
+        cache.entries[0].friendly_app_name.as_deref(),
+        Some("Street tool")
+    );
+    assert_eq!(cache.entries[0].application_company, None);
+    assert_eq!(cache.entries[1].path, r"C:\Tools\STRASSE.EXE");
+    assert_eq!(cache.entries[1].friendly_app_name, None);
+    assert_eq!(
+        cache.entries[1].application_company.as_deref(),
+        Some("Another company")
+    );
+    assert_eq!(
+        cache.entries[2].friendly_app_name.as_deref(),
+        Some("Cafe tool")
+    );
+    assert_eq!(
+        cache.entries[2].application_company.as_deref(),
+        Some("Cafe company")
+    );
+}
+
+#[test]
+fn value_lookup_does_not_expand_unicode_names() {
+    let mut tree = Tree::default();
+    tree.sz("Names", "straße", "first")
+        .sz("Names", "STRASSE", "second")
+        .sz("Names", "café", "third");
+    let hive = tree.hive("ROOT");
+    let names = hive.key("Names").unwrap();
+    assert_eq!(names.value("STRASSE").unwrap().name(), "STRASSE");
+    assert_eq!(names.value("straße").unwrap().name(), "straße");
+    assert_eq!(names.value("CAFÉ").unwrap().name(), "café");
 }
