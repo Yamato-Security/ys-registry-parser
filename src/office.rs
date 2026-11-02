@@ -562,6 +562,19 @@ fn text_of(value: &Value) -> (Option<String>, Vec<String>) {
 fn setting_text(value: &Value) -> (Option<String>, Vec<String>) {
     let (bytes, read_problem) = value.read_data();
     let mut problems: Vec<String> = read_problem.into_iter().collect();
+    let name = value.name();
+    let numeric = SECURITY_SETTINGS
+        .iter()
+        .copied()
+        .chain([
+            "AllowNetworkLocations",
+            "AllowSubFolders",
+            "DisableAllTrustedLocations",
+        ])
+        .any(|setting| setting.eq_ignore_ascii_case(&name));
+    if numeric && value.value_type() != ValueType::Dword {
+        problems.push(format!("is {}, not REG_DWORD", value.value_type().name()));
+    }
     let text = match decode(value.data_type(), &bytes) {
         Data::Number(n) => Some(match setting_meaning(&value.name(), n) {
             Some(meaning) => format!("{n} ({meaning})"),

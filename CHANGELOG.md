@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Diagnose Office macro and trust-policy values stored with a non-DWORD type while retaining
+  their original bytes and readable data. (@YamatoSecurity)
 - Office retains malformed trusted-location and multi-string bytes, diagnoses invalid timestamps,
   and leaves unknown trust flags unknown instead of claiming macros are disabled. (@YamatoSecurity)
 - Security settings keep AMSI COM-value damage and replay provenance, reject invalid RDP ports
