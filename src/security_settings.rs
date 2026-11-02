@@ -6,10 +6,12 @@
 //!
 //! Each setting found is a [`Setting`] with its value, what the value means, whether it weakens
 //! the default, and whether it comes from a `Policies` key (Group Policy, or a tool writing
-//! there). A setting that isn't there is not reported: Windows then uses its default.
+//! there). A setting that isn't there is not reported; this does not establish its effective
+//! state, which can depend on other configuration sources and the platform version.
 //!
 //! *Weakens the default* compares a value with what current Windows (10 and 11) does without it:
-//! a protection or an evidence source turned off or lowered. It doesn't say the system was
+//! a protection or an evidence source that the stored setting can lower when honored. It does
+//! not measure the effective protection state, and doesn't say the system was
 //! compromised: administrators, other security products and older Windows versions set some of
 //! these values too, and the meaning says so where it is common. `None` is for values that are
 //! neither (a port, a size, an AMSI provider) or that this can't tell.
@@ -119,7 +121,7 @@ const SOFTWARE: &[Entry] = &[
         Area::Defender,
         DEFENDER,
         "DisableAntiVirus",
-        Rule::Off("Microsoft Defender Antivirus"),
+        Rule::Number(disable_antispyware),
     ),
     (
         "defender_disable_realtime_monitoring",
@@ -182,14 +184,14 @@ const SOFTWARE: &[Entry] = &[
         Area::Defender,
         DEFENDER_POLICY,
         "DisableAntiSpyware",
-        Rule::Off("Microsoft Defender Antivirus"),
+        Rule::Number(disable_antispyware),
     ),
     (
         "defender_disable_antivirus",
         Area::Defender,
         DEFENDER_POLICY,
         "DisableAntiVirus",
-        Rule::Off("Microsoft Defender Antivirus"),
+        Rule::Number(disable_antispyware),
     ),
     (
         "defender_disable_realtime_monitoring",
@@ -618,9 +620,9 @@ fn unknown(n: u32) -> (String, Option<bool>) {
 
 fn disable_antispyware(n: u32) -> (String, Option<bool>) {
     match n {
-        0 => ("Microsoft Defender Antivirus on".to_owned(), Some(false)),
+        0 => ("legacy Defender disable flag is clear; check effective protection separately".to_owned(), Some(false)),
         1 => (
-            "Microsoft Defender Antivirus turned off (also set by Windows while another antivirus is registered)"
+            "legacy Defender disable flag is set; modern platforms or tamper protection can ignore it (also used when another antivirus is registered)"
                 .to_owned(),
             Some(true),
         ),
@@ -811,6 +813,9 @@ fn deny_ts_connections(n: u32) -> (String, Option<bool>) {
 }
 
 fn rdp_port(n: u32) -> (String, Option<bool>) {
+    if !(1..=u32::from(u16::MAX)).contains(&n) {
+        return (format!("{n}: not a valid TCP port"), None);
+    }
     if n == 3389 {
         (
             "Remote Desktop listens on TCP 3389 (the default)".to_owned(),
@@ -1008,6 +1013,9 @@ fn setting(setting: &'static str, area: Area, key: &Key, key_path: String) -> Se
 /// The number of a `REG_DWORD` (or `REG_QWORD`) value, or with a problem its bytes.
 fn number_of(value: &Value, record: &mut Setting) -> Option<u64> {
     let (bytes, why) = value.read_data();
+    if why.is_some() {
+        record.data_raw = Some(bytes.clone());
+    }
     record.problems.extend(why);
     match (value.value_type(), decode(value.data_type(), &bytes)) {
         (ValueType::Dword | ValueType::Qword, Data::Number(n)) => Some(n),
@@ -1029,6 +1037,13 @@ fn number_of(value: &Value, record: &mut Setting) -> Option<u64> {
 /// The text of a string value, or with a problem its bytes.
 fn text_of(value: &Value, record: &mut Setting) -> Option<String> {
     let (text, why) = crate::system::string(value);
+    let why = why.or_else(|| {
+        (!matches!(
+            value.value_type(),
+            ValueType::Sz | ValueType::ExpandSz | ValueType::Link
+        ))
+        .then(|| format!("is {}, not a string", value.value_type().name()))
+    });
     if let Some(why) = why {
         record.problems.push(why);
         record.data_raw = Some(value.read_data().0);
@@ -1078,11 +1093,21 @@ fn read_entries(hive: &Hive, prefix: &str, entries: &[Entry], out: &mut Vec<Sett
         let Some(key) = hive.key(&key_path) else {
             continue;
         };
-        let Some(value) = key.value(value_name) else {
+        let (values, problems) = key.values();
+        let value = values
+            .iter()
+            .find(|v| v.name().eq_ignore_ascii_case(value_name));
+        if value.is_none() && problems.is_empty() {
             continue;
-        };
+        }
         let mut record = setting(name, area, &key, key_path);
-        apply(rule, &value, &mut record);
+        value_name.clone_into(&mut record.value_name);
+        record.problems.extend(problems);
+        if let Some(value) = value {
+            apply(rule, value, &mut record);
+        } else {
+            "value unavailable in damaged value list".clone_into(&mut record.meaning);
+        }
         out.push(record);
     }
 }
@@ -1104,7 +1129,7 @@ pub fn software(hive: &Hive) -> (Vec<Setting>, Vec<String>) {
         );
     }
     amsi_providers(hive, &mut settings, &mut problems);
-    channels(hive, &mut settings);
+    channels(hive, &mut settings, &mut problems);
     (settings, problems)
 }
 
@@ -1151,8 +1176,12 @@ fn amsi_providers(hive: &Hive, out: &mut Vec<Setting>, problems: &mut Vec<String
         );
         let server = hive
             .key(&format!(r"Classes\CLSID\{clsid}\InprocServer32"))
-            .and_then(|k| k.value(""))
-            .and_then(|v| crate::system::string(&v).0)
+            .and_then(|key| {
+                record.replayed |= key.status() == Status::Replayed;
+                let value = key.value("")?;
+                record.replayed |= value.status() == Status::Replayed;
+                text_of(&value, &mut record)
+            })
             .filter(|s| !s.is_empty());
         record.meaning = match server {
             Some(dll) => format!("an AMSI provider: {dll}"),
@@ -1164,13 +1193,18 @@ fn amsi_providers(hive: &Hive, out: &mut Vec<Setting>, problems: &mut Vec<String
 }
 
 /// The event log channels of [`CHANNELS`] there are: whether each is on, and its size.
-fn channels(hive: &Hive, out: &mut Vec<Setting>) {
+fn channels(hive: &Hive, out: &mut Vec<Setting>, problems: &mut Vec<String>) {
     for (channel, on_by_default) in CHANNELS {
         let key_path = format!(r"{WINEVT_CHANNELS}\{channel}");
         let Some(key) = hive.key(&key_path) else {
             continue;
         };
-        if let Some(value) = key.value("Enabled") {
+        let (values, why) = key.values();
+        problems.extend(why.into_iter().map(|w| format!("{key_path}: {w}")));
+        if let Some(value) = values
+            .iter()
+            .find(|v| v.name().eq_ignore_ascii_case("Enabled"))
+        {
             let mut record = setting(
                 "event_channel_enabled",
                 Area::Evidence,
@@ -1179,7 +1213,7 @@ fn channels(hive: &Hive, out: &mut Vec<Setting>) {
             );
             record.value_name = value.name();
             record.replayed |= value.status() == Status::Replayed;
-            if let Some(n) = number_of(&value, &mut record) {
+            if let Some(n) = number_of(value, &mut record) {
                 record.value = Some(n.to_string());
                 (record.meaning, record.weakens_default) = match (n, on_by_default) {
                     (0, true) => (
@@ -1196,11 +1230,14 @@ fn channels(hive: &Hive, out: &mut Vec<Setting>) {
             }
             out.push(record);
         }
-        if let Some(value) = key.value("MaxSize") {
+        if let Some(value) = values
+            .iter()
+            .find(|v| v.name().eq_ignore_ascii_case("MaxSize"))
+        {
             let mut record = setting("event_channel_max_size", Area::Evidence, &key, key_path);
             record.value_name = value.name();
             record.replayed |= value.status() == Status::Replayed;
-            if let Some(n) = number_of(&value, &mut record) {
+            if let Some(n) = number_of(value, &mut record) {
                 record.value = Some(n.to_string());
                 record.meaning = format!("{channel} keeps up to {}", size(n));
             }
@@ -1224,10 +1261,15 @@ pub fn system(hive: &Hive, set: u32) -> Option<(Vec<Setting>, Vec<String>)> {
         let (logs, why) = logs.subkeys();
         problems.extend(why.into_iter().map(|w| format!("{logs_path}: {w}")));
         for log in logs {
-            let Some(value) = log.value("MaxSize") else {
+            let name = log.name();
+            let (values, why) = log.values();
+            problems.extend(why.into_iter().map(|w| format!("{logs_path}\\{name}: {w}")));
+            let Some(value) = values
+                .iter()
+                .find(|v| v.name().eq_ignore_ascii_case("MaxSize"))
+            else {
                 continue;
             };
-            let name = log.name();
             let mut record = setting(
                 "event_log_max_size",
                 Area::Evidence,
@@ -1236,7 +1278,7 @@ pub fn system(hive: &Hive, set: u32) -> Option<(Vec<Setting>, Vec<String>)> {
             );
             record.value_name = value.name();
             record.replayed |= value.status() == Status::Replayed;
-            if let Some(n) = number_of(&value, &mut record) {
+            if let Some(n) = number_of(value, &mut record) {
                 record.value = Some(n.to_string());
                 let main = ["Application", "Security", "System"]
                     .iter()
@@ -1277,6 +1319,14 @@ pub fn ntuser(hive: &Hive) -> Vec<Setting> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_rdp_ports_have_no_verdict() {
+        for port in [0, 65536, u32::MAX] {
+            assert_eq!(rdp_port(port).1, None);
+            assert!(rdp_port(port).0.contains("not a valid TCP port"));
+        }
+    }
 
     #[test]
     fn meanings() {

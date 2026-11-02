@@ -41,3 +41,23 @@ pub(crate) fn name(raw: &[u8], one_byte: bool) -> String {
         String::from_utf16_lossy(&utf16_units(raw))
     }
 }
+
+/// An ordinal case-insensitive comparison key. Do not expand a character into multiple
+/// characters: Unicode full uppercasing would conflate distinct names such as `straße`
+/// and `STRASSE`. Keep ordinary one-character mappings, including non-ASCII letters.
+pub(crate) fn upcase_name(name: &str) -> String {
+    if name.is_ascii() {
+        return name.to_ascii_uppercase();
+    }
+    name.chars()
+        .map(|character| {
+            let mut uppercase = character.to_uppercase();
+            let first = uppercase.next().unwrap_or(character);
+            if uppercase.next().is_none() {
+                first
+            } else {
+                character
+            }
+        })
+        .collect()
+}

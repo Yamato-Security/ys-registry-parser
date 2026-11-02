@@ -7,8 +7,8 @@ use std::io::Read;
 
 use ys_registry_parser::Hive;
 use ys_registry_parser::system::{
-    Action, ControlSets, FailureAction, Service, computer_name, error_control_name, services,
-    start_name, type_names,
+    Action, ControlSets, FailureAction, Moderator, Service, bam, computer_name, device_path,
+    error_control_name, services, start_name, type_names,
 };
 
 fn system_bytes() -> Vec<u8> {
@@ -239,4 +239,87 @@ fn failure_actions_must_be_binary_and_keep_malformed_bytes() {
         "{:?}",
         eventlog.problems
     );
+}
+
+/// regipy's `SYSTEM_WIN_10_1709` (MIT; `tests/fixtures/regipy/`): a Windows 10 1709 hive upgraded
+/// to a later release, with BAM's keys in both layouts. Every entry is what regipy's `bam` plugin
+/// gives (its times to the microsecond) and Plaso's (to the 100 ns).
+fn win10_1709() -> Hive {
+    let path = format!(
+        "{}/tests/fixtures/regipy/SYSTEM_WIN_10_1709.gz",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut data = Vec::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
+        .read_to_end(&mut data)
+        .unwrap();
+    open(data)
+}
+
+#[test]
+fn bam_in_both_layouts() {
+    let hive = win10_1709();
+    let (entries, problems) = bam(&hive, 1).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(entries.len(), 55);
+    assert!(entries.iter().all(|e| e.moderator == Moderator::Bam
+        && e.problems.is_empty()
+        && e.data_raw.is_none()
+        && e.last_run.is_some()
+        && !e.replayed));
+    let user = "S-1-5-21-2595688666-2948619230-3055395256-1001";
+    let count = |layout: &str, sid: &str| {
+        entries
+            .iter()
+            .filter(|e| {
+                e.user_sid == sid
+                    && e.key_path == format!(r"ControlSet001\Services\bam\{layout}\{sid}")
+            })
+            .count()
+    };
+    assert_eq!(
+        [
+            count(r"State\UserSettings", user),
+            count(r"State\UserSettings", "S-1-5-90-0-1"),
+            count("UserSettings", user),
+            count("UserSettings", "S-1-5-90-0-1"),
+        ],
+        [30, 1, 23, 1]
+    );
+    // State\UserSettings first, then UserSettings; packaged apps and paths
+    let first = &entries[0];
+    assert_eq!(
+        (first.program.as_str(), first.last_run),
+        (
+            "Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy",
+            Some(132_317_609_713_588_336)
+        )
+    );
+    assert_eq!(device_path(&first.program), None);
+    let dwm = entries.last().unwrap();
+    assert_eq!(
+        dwm.key_path,
+        r"ControlSet001\Services\bam\UserSettings\S-1-5-90-0-1"
+    );
+    assert_eq!(
+        (dwm.program.as_str(), dwm.last_run),
+        (
+            r"\Device\HarddiskVolume2\Windows\System32\dwm.exe",
+            Some(132_024_658_042_194_716)
+        )
+    );
+    assert_eq!(
+        device_path(&dwm.program),
+        Some((r"\Device\HarddiskVolume2", r"\Windows\System32\dwm.exe"))
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| device_path(&e.program).is_none())
+            .count(),
+        34
+    );
+    // the hive has no other control set, and the Windows 7 hive no BAM
+    assert!(bam(&hive, 2).is_none());
+    assert!(bam(&system(), 1).is_none());
 }
