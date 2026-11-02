@@ -36,6 +36,7 @@ mod digest;
 mod hive;
 pub mod installed;
 mod log;
+pub mod lsa_secrets;
 pub mod mru;
 pub mod ntuser;
 pub mod office;

@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Diagnose invalid LSA-secret update times and malformed cached-logon headers without exposing
+  credential bytes or counting damaged records as valid users. (@YamatoSecurity)
 - Do not apply inherited OS-loader-only BCD settings to boot-manager objects. (@YamatoSecurity)
 - AppCompat validates and bounds CIT/LZNT1 decoding, preserves Unicode paths and malformed
   time/value bytes, and keeps shim-path join provenance and diagnostics. (@YamatoSecurity)
@@ -186,3 +188,8 @@ First version. (@YamatoSecurity)
   `object_type_name`, `device_summary`); `recoveryenabled`, `testsigning`, `nointegritychecks`,
   `safeboot` and `bootstatuspolicy`, own or inherited (`boot_status_policy_name`,
   `safe_boot_name`). (@YamatoSecurity)
+- `lsa_secrets`: the LSA secrets (`secrets`, `Secret`, `SecretValue`, `SecretKind`, `secret_kind`)
+  and cached domain logons (`cached_logons`, `CachedLogons`) of a `SECURITY` hive, as names, kinds
+  and times only: whether `CurrVal` and `OldVal` hold data (their sizes, the bytes never read),
+  their keys' times and `CupdTime` and `OupdTime`; the cache's slots, those in use and
+  `NL$Control`'s count. Nothing is decrypted. (@YamatoSecurity)

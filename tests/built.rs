@@ -9,6 +9,7 @@ use ys_registry_parser::app_history::{self, App, AppTrace};
 use ys_registry_parser::appcompat::{self, AppCompatEntry};
 use ys_registry_parser::audit_policy::{Layout, Setting, audit_policy};
 use ys_registry_parser::installed::{self, Program, ProgramSource, Scope};
+use ys_registry_parser::lsa_secrets::{cached_logons, secrets};
 use ys_registry_parser::ntuser::{
     classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
 };
@@ -6621,4 +6622,137 @@ fn bcd_loader_only_settings_do_not_apply_to_a_boot_manager() {
     assert_eq!(manager.test_signing, None);
     let settings = objects.iter().find(|o| o.guid == settings).unwrap();
     assert_eq!(settings.safe_boot, Some(1));
+}
+
+/// A cached logon slot: in use (a user name of `user_length` bytes) or empty.
+fn cache_slot(user_length: u16) -> Vec<u8> {
+    let mut slot = vec![0u8; 168];
+    slot[..2].copy_from_slice(&user_length.to_le_bytes());
+    if user_length > 0 {
+        slot[64..80].fill(0x5a);
+    }
+    slot
+}
+
+#[test]
+fn lsa_secrets_names_times_and_cache_slots() {
+    let service = r"Policy\Secrets\_SC_ExampleSvc";
+    let questions = r"Policy\Secrets\L$_SQSA_S-1-5-21-1-2-3-1001";
+    let mut t = Tree::default();
+    t.set(&format!(r"{service}\CurrVal"), "", 0, &[0xee; 60])
+        .set(&format!(r"{service}\OldVal"), "", 0, &[])
+        .set(&format!(r"{service}\CupdTime"), "", 0, &WHEN.to_le_bytes())
+        .set(&format!(r"{service}\OupdTime"), "", 0, &0u64.to_le_bytes())
+        .set(&format!(r"{questions}\CurrVal"), "", 0, &[0xee; 140])
+        // a time that isn't 8 bytes; no OldVal or OupdTime
+        .set(&format!(r"{questions}\CupdTime"), "", 0, &[1, 2, 3])
+        .at(r"Policy\Secrets\DefaultPassword");
+    t.set("Cache", "NL$1", 3, &cache_slot(10))
+        .set("Cache", "NL$2", 3, &cache_slot(0))
+        .set("Cache", "NL$3", 3, &cache_slot(12))
+        .set("Cache", "NL$Control", 3, &[4, 0, 1, 0, 3, 0, 0, 0]);
+    let hive = t.hive("ROOT");
+    let (found, problems) = secrets(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let got: Vec<(&str, &str, Option<&str>, Option<&str>)> = found
+        .iter()
+        .map(|s| {
+            (
+                s.name.as_str(),
+                s.kind.name(),
+                s.service_name.as_deref(),
+                s.user_sid.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "_SC_ExampleSvc",
+                "service_account",
+                Some("ExampleSvc"),
+                None
+            ),
+            (
+                "L$_SQSA_S-1-5-21-1-2-3-1001",
+                "security_questions",
+                None,
+                Some("S-1-5-21-1-2-3-1001")
+            ),
+            ("DefaultPassword", "autologon", None, None),
+        ]
+    );
+    let svc = &found[0];
+    assert_eq!(
+        (
+            svc.current.size,
+            svc.current.set,
+            svc.current.key_last_written
+        ),
+        (Some(60), Some(WHEN), Some(WHEN))
+    );
+    // an empty OldVal, and an OupdTime of 0
+    assert_eq!((svc.old.size, svc.old.set), (Some(0), None));
+    assert!(svc.current.has_data() && !svc.old.has_data());
+    let q = &found[1];
+    assert_eq!(
+        q.problems,
+        [r"Policy\Secrets\L$_SQSA_S-1-5-21-1-2-3-1001\CupdTime: 3 bytes, not a FILETIME (010203)"]
+    );
+    assert_eq!(
+        (q.current.set, q.old.size, q.old.key_last_written),
+        (None, None, None)
+    );
+    // a secret without its values
+    assert!(!found[2].current.has_data() && found[2].current.key_last_written.is_none());
+
+    let cache = cached_logons(&hive).unwrap();
+    assert_eq!(
+        (cache.slots, cache.in_use, cache.control_count),
+        (3, 2, Some(3))
+    );
+    assert_eq!(cache.problems, Vec::<String>::new());
+    // NL$Control too short; no Cache, no Secrets
+    let mut t = Tree::default();
+    t.set("Cache", "NL$Control", 3, &[4, 0]);
+    let cache = cached_logons(&t.hive("ROOT")).unwrap();
+    assert_eq!(
+        cache.problems,
+        [r"Cache\NL$Control: 2 bytes, too short for a count"]
+    );
+    let empty = Tree::default().hive("ROOT");
+    assert!(secrets(&empty).is_none() && cached_logons(&empty).is_none());
+}
+
+#[test]
+fn lsa_secret_time_out_of_range_is_not_silently_exported_as_missing() {
+    let mut t = Tree::default();
+    t.set(
+        r"Policy\Secrets\Example\CupdTime",
+        "",
+        0,
+        &u64::MAX.to_le_bytes(),
+    );
+    let hive = t.hive("SECURITY");
+    let (found, _) = secrets(&hive).unwrap();
+    assert_eq!(found[0].current.set, None);
+    assert!(found[0].problems.iter().any(|p| p.contains("FILETIME")));
+}
+
+#[test]
+fn lsa_cache_damaged_headers_do_not_count_as_valid_users() {
+    let mut t = Tree::default();
+    t.set("Cache", "NL$1", 3, &[10, 0]);
+    t.set("Cache", "NL$2", 3, &cache_slot(3));
+    t.set("Cache", "NL$3", 1, &cache_slot(10));
+    t.set("Cache", "NL$4", 3, &[0]);
+    t.set("Cache", "NL$Control", 1, &[0, 0, 0, 0, 10, 0, 0, 0]);
+    let hive = t.hive("SECURITY");
+    let cache = cached_logons(&hive).unwrap();
+    assert_eq!(cache.slots, 4);
+    assert_eq!(cache.in_use, 0);
+    assert_eq!(cache.control_count, None);
+    assert_eq!(cache.problems.len(), 5);
+    assert!(!format!("{cache:?}").contains("5a5a"));
 }

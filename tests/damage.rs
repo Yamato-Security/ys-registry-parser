@@ -11,6 +11,7 @@ use ys_registry_parser::audit_policy::{audit_events, audit_policy};
 use ys_registry_parser::bcd::{bcd, device_summary};
 use ys_registry_parser::comdlg32::{dialogs, item_list_problem};
 use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
+use ys_registry_parser::lsa_secrets::{cached_logons, secret_kind, secrets};
 use ys_registry_parser::mru::mru_lists;
 use ys_registry_parser::ntuser::{
     classes_sid, mui_cache, profile_name, recent_docs, user_assist, user_assist_data,
@@ -239,6 +240,10 @@ fn read_all(data: Vec<u8>) {
         }
     }
     let _ = (appcompat::software(&hive), appcompat::ntuser(&hive));
+    for secret in secrets(&hive).map(|s| s.0).unwrap_or_default() {
+        let _ = (secret.kind.name(), secret.current.has_data());
+    }
+    let _ = cached_logons(&hive);
     let machine = MachineClasses::read(&hive);
     let _ = (feature_usage(&hive), feature_usage_created(&hive));
     let _ = (recent_apps(&hive), taskband(&hive), programs_cache(&hive));
@@ -349,12 +354,6 @@ proptest! {
         }
     }
 
-    #[test]
-    fn a_damaged_security_hive(
-        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)
-    ) {
-        read_all(damage(security().to_vec(), flips));
-    }
 
     /// Compatibility data's keys and values damaged: read without a panic.
     #[test]
@@ -366,6 +365,13 @@ proptest! {
         {
             let _ = appcompat::ntuser(&hive);
         }
+    }
+
+    #[test]
+    fn a_damaged_security_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)
+    ) {
+        read_all(damage(security().to_vec(), flips));
     }
 
     #[test]
@@ -428,6 +434,7 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = secret_kind(&String::from_utf8_lossy(&rest));
         let _ = (device_summary(&rest), device_summary(&bytes));
         let _ = appcompat::lznt1(&rest, 1 << 16);
         let _ = appcompat::sign_media(&String::from_utf8_lossy(&rest));

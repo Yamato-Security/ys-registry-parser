@@ -332,6 +332,17 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   gives it) and `Setting`: none, success, failure, or both. A value of an unknown layout or
   size is a problem and keeps its bytes.
 
+- LSA secrets and cached domain logons in a `SECURITY` hive (`lsa_secrets`), as names and times
+  only: nothing is decrypted, and no secret's bytes are read. `secrets` gives each key under
+  `Policy\Secrets` with its kind from its name (`secret_kind`: `DefaultPassword` autologon,
+  `_SC_<service>` a service account's password with the service, `$MACHINE.ACC`,
+  `DPAPI_SYSTEM`, `NL$KM`, `L$_SQSA_<SID>` security questions with the SID, RAS credentials,
+  and `L$`, `G$` and `M$` private data), its key's time, and for `CurrVal` and `OldVal` whether
+  they hold data (from their value records' sizes), their keys' times and when they were set
+  (`CupdTime`, `OupdTime`). `cached_logons` counts `Cache`'s slots (`NL$1` …), those in use (by
+  the user name's length in each record's clear header) and `NL$Control`'s count of the slots
+  Windows keeps.
+
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
 that leads back to a key already read is read once; a base block whose root is not a key gives way
@@ -509,6 +520,11 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `ntuser_persistence`, and the same (none) `AppInit_DLLs` and IFEO debuggers as its
   `appinitdlls` and `image_file_execution_options`; on regipy's `SYSTEM`, the same LSA packages
   as its `lsa_packages`.
+- LSA secrets and cached logons on 8 public `SECURITY` hives (regipy's, the DFIR Artifact
+  Museum's and one more public test set; Windows 8.x to 11, Server 2012 R2 and 2022; 29
+  secrets, among them `$MACHINE.ACC`, `L$_SQSA_…` and an `_SC_` service's): the same names, key
+  times, value sizes and `CupdTime` and `OupdTime` as python-registry reads, and the same cache
+  slots and slots in use (2 of 10 on a domain member).
 - Application compatibility data on 10 public `SOFTWARE` and 19 public `NTUSER.DAT` hives
   (regipy's, Plaso's, notatin's, artemis' and the DFIR Artifact Museum's, Windows 7 to 11): the
   same 449 Program Compatibility Assistant `Store` values (name and data, byte for byte), 52
