@@ -52,3 +52,8 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `appcompat` (`AppCompatEntry`, `AppCompatSource`): application compatibility data beyond the
+  ShimCache and Amcache, in `SOFTWARE` (`software`: compatibility layers, `CIT\Module`,
+  `CIT\System`'s compressed databases, custom shim databases in `InstalledSDB` and `Custom`) and
+  `NTUSER.DAT` (`ntuser`: layers, and the Program Compatibility Assistant's `Store` and
+  `Persisted`); `lznt1` (LZNT1 decompression) and `sign_media`. (@YamatoSecurity)

@@ -24,6 +24,7 @@
 //! (<https://github.com/msuhanov/regf>, CC BY 4.0). Damage is reported, never a panic: see
 //! [`Key::subkeys`], [`Key::values`] and [`Value::read_data`].
 
+pub mod appcompat;
 mod bytes;
 mod data;
 mod deleted;

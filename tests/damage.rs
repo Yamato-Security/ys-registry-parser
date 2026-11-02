@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::appcompat;
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
@@ -35,6 +36,22 @@ fn system() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// regipy's dirty `NTUSER.DAT`, with the Program Compatibility Assistant's `Store`, unpacked
+/// once.
+fn ntuser_pca() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| fixture("transactions_NTUSER.DAT"))
+}
+
+/// A CIT database of Plaso's Windows 10 `SOFTWARE` hive.
+fn cit_database() -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/tests/fixtures/plaso/cit_system_88EDBB9D.bin",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }
 
 /// Flip bytes of `data` past its base block.
@@ -68,6 +85,7 @@ fn read_all(data: Vec<u8>) {
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
+    let _ = (appcompat::software(&hive), appcompat::ntuser(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -108,6 +126,18 @@ proptest! {
         read_all(damage(system().to_vec(), flips));
     }
 
+    /// Compatibility data's keys and values damaged: read without a panic.
+    #[test]
+    fn damaged_appcompat(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(ntuser_pca().to_vec(), flips), &[])
+        {
+            let _ = appcompat::ntuser(&hive);
+        }
+    }
+
     #[test]
     fn a_damaged_ntuser_hive(
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
@@ -138,5 +168,18 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = appcompat::lznt1(&rest, 1 << 16);
+        let _ = appcompat::sign_media(&String::from_utf8_lossy(&rest));
+    }
+
+    /// A real CIT database with bytes changed: decompressed as far as it goes.
+    #[test]
+    fn damaged_lznt1(flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..40)) {
+        let mut data = cit_database();
+        for (at, byte) in flips {
+            let at = 8 + at % (data.len() - 8);
+            data[at] = byte;
+        }
+        let _ = appcompat::lznt1(&data[8..], 1 << 20);
     }
 }

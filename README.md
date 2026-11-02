@@ -120,6 +120,16 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
     (`ActivatableClasses\…\DebugInformation`). With the machine's `MachineClasses` (read from
     `SOFTWARE`), each says whether it overrides the machine's registration of the same class or
     command.
+- Application compatibility data (`appcompat`), one `AppCompatEntry` per program, module use or
+  shim database, with its `AppCompatSource`, key, value and last-write time: `software` reads
+  `SOFTWARE`'s compatibility layers (`AppCompatFlags\Layers` and `Wow6432Node`'s: each program and
+  its layers), `CIT\Module` (each program that loaded a tracked module, and when it last did),
+  `CIT\System`'s databases (LZNT1-compressed, `lznt1`; the program paths and command lines in
+  them), and custom shim databases (`InstalledSDB\{GUID}`: path, description, type and install
+  time; `Custom\<program>`: each database applied to a program, with its install time and path);
+  `ntuser` reads a user's layers and the Program Compatibility Assistant's `Store` (Windows 8 and
+  later; each program, its `SACP` data kept as bytes) and `Persisted` (Windows 7), with the
+  removable media id of `SIGN.MEDIA=` names (`sign_media`).
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
@@ -216,6 +226,15 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `ntuser_persistence`, and the same (none) `AppInit_DLLs` and IFEO debuggers as its
   `appinitdlls` and `image_file_execution_options`; on regipy's `SYSTEM`, the same LSA packages
   as its `lsa_packages`.
+- Application compatibility data on 10 public `SOFTWARE` and 19 public `NTUSER.DAT` hives
+  (regipy's, Plaso's, notatin's, artemis' and the DFIR Artifact Museum's, Windows 7 to 11): the
+  same 449 Program Compatibility Assistant `Store` values (name and data, byte for byte), 52
+  `Persisted` values and 3 layers as a reader built on yarp (the one dirty hive with them has one
+  more `Store` value with its logs replayed, as yarp's replay has); on Plaso's Windows 10
+  `SOFTWARE`, the same program paths and command lines, database by database (7 databases, 46
+  strings), as dissect.target's `cit` plugin, which lists one program twice in one database; and
+  no layers or custom shim databases in any public `SOFTWARE`, as regipy's `appcompat_flags`
+  finds.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
@@ -245,4 +264,5 @@ data cells the entry didn't write.
 Apache-2.0 (`LICENSE`). The transaction log replay comes from Yamato Security's
 [ys-shimcache-parser](https://github.com/Yamato-Security/ys-shimcache-parser) (Apache-2.0). The
 format is Maxim Suhanov's [Windows registry file format specification](https://github.com/msuhanov/regf)
-(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`).
+(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`);
+the CIT database is Plaso's, under the Apache licence 2.0 (`tests/fixtures/plaso/LICENSE`).
