@@ -609,6 +609,147 @@ fn item(value: &Value, n: u32, position: Option<u32>, list_replayed: bool) -> Re
     }
 }
 
+/// One lettered value of an MRU key ordered by `MRUList` (`RunMRU`, Windows XP's `OpenSaveMRU`,
+/// …): where the list puts it.
+pub(crate) struct MruLetter<'h> {
+    /// Its place in `MRUList` (0: the most recent); `None` when the list doesn't have it.
+    pub(crate) position: Option<u32>,
+    /// Its letter: the value's name.
+    pub(crate) letter: char,
+    /// The value; `None` when `MRUList` lists a letter no value has.
+    pub(crate) value: Option<Value<'h>>,
+    /// Why it is out of the list, or missing.
+    pub(crate) problem: Option<String>,
+}
+
+/// Compare one-letter value names with the registry's non-expanding uppercase mapping.
+fn same_mru_letter(a: char, b: char) -> bool {
+    a == b || upcase_name(&a.to_string()) == upcase_name(&b.to_string())
+}
+
+/// Keep original positions, including the gaps left by malformed characters or duplicates.
+fn mru_letters(bytes: &[u8], problems: &mut Vec<String>) -> Vec<(usize, char)> {
+    if !bytes.len().is_multiple_of(2) {
+        problems.push("MRUList: odd byte count: the UTF-16 data is cut short".to_owned());
+    }
+    let units = utf16_units(bytes);
+    let end = units.iter().position(|&u| u == 0).unwrap_or_else(|| {
+        problems.push("MRUList: no terminating NUL".to_owned());
+        units.len()
+    });
+    if units[end..].iter().any(|&u| u != 0) {
+        problems.push("MRUList: characters past its NUL".to_owned());
+    }
+    let mut list = Vec::new();
+    for (position, c) in char::decode_utf16(units[..end].iter().copied()).enumerate() {
+        let Ok(c) = c else {
+            problems.push("MRUList: not valid UTF-16".to_owned());
+            continue;
+        };
+        if list.iter().any(|&(_, l)| same_mru_letter(l, c)) {
+            problems.push(format!("MRUList: {c} is listed twice"));
+        } else {
+            // A damaged character or a duplicate still occupies its slot. Do not
+            // promote a later value to position zero and give it the key's time.
+            list.push((position, c));
+        }
+    }
+    list
+}
+
+/// The lettered values of `key` (`a`, `b`, …) in the order of its `MRUList`, a string of their
+/// letters with the most recent first, then those it doesn't list; whether that list came from
+/// the transaction logs; and what is wrong with the key's values. Letters match in any case, as
+/// value names do. Values named in `others` are expected besides the lettered ones.
+pub(crate) fn mru_list_items<'h>(
+    key: &Key<'h>,
+    others: &[&str],
+) -> (Vec<MruLetter<'h>>, bool, Vec<String>) {
+    let (values, mut problems) = key.values();
+    let mut order: Option<(Vec<(usize, char)>, bool)> = None;
+    let mut lettered: Vec<(char, Value<'h>)> = Vec::new();
+    for value in values {
+        let name = value.name();
+        let mut chars = name.chars();
+        if name.eq_ignore_ascii_case("MRUList") {
+            let (bytes, problem) = value.read_data();
+            if let Some(why) = problem {
+                problems.push(format!("MRUList: {why}"));
+            }
+            if !matches!(value.value_type(), ValueType::Sz | ValueType::ExpandSz) {
+                problems.push(format!(
+                    "MRUList: is {}, not REG_SZ",
+                    value.value_type().name()
+                ));
+            }
+            let list = mru_letters(&bytes, &mut problems);
+            if order.is_some() {
+                problems.push("MRUList is present more than once".to_owned());
+            } else {
+                order = Some((list, value.status() == Status::Replayed));
+            }
+        } else if let (Some(letter), None) = (chars.next(), chars.next()) {
+            if lettered
+                .iter()
+                .any(|(other, _)| same_mru_letter(*other, letter))
+            {
+                problems.push(format!("lettered value {letter} is present more than once"));
+            }
+            lettered.push((letter, value));
+        } else if !others.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
+            problems.push(format!("value {name:?} is not a lettered item"));
+        }
+    }
+    let (order, list_replayed) = order.unwrap_or_else(|| {
+        if !lettered.is_empty() {
+            problems.push("it has no MRUList: its items' order is unknown".to_owned());
+        }
+        (Vec::new(), false)
+    });
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut items = Vec::new();
+    for &(position, letter) in &order {
+        let position = u32::try_from(position).ok();
+        match lettered
+            .iter()
+            .enumerate()
+            .find(|(at, (l, _))| same_mru_letter(*l, letter) && !used.contains(at))
+        {
+            Some((at, (l, value))) => {
+                used.insert(at);
+                items.push(MruLetter {
+                    position,
+                    letter: *l,
+                    value: Some(*value),
+                    problem: None,
+                });
+            }
+            None => items.push(MruLetter {
+                position,
+                letter,
+                value: None,
+                problem: Some(format!("MRUList lists value {letter}, which is not there")),
+            }),
+        }
+    }
+    for (at, (letter, value)) in lettered.iter().enumerate() {
+        if !used.contains(&at) {
+            let problem = if order.iter().any(|&(_, l)| same_mru_letter(l, *letter)) {
+                format!("another value named {letter} already occupies its MRUList position")
+            } else {
+                "MRUList doesn't list it".to_owned()
+            };
+            items.push(MruLetter {
+                position: None,
+                letter: *letter,
+                value: Some(*value),
+                problem: Some(problem),
+            });
+        }
+    }
+    (items, list_replayed, problems)
+}
+
 /// The name of the profile folder an `NTUSER.DAT` belongs to (`alice` for `C:\Users\alice`),
 /// from the paths of its shell folders (`Local AppData` first: it is never redirected).
 #[must_use]

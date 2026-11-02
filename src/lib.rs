@@ -25,6 +25,7 @@
 //! [`Key::subkeys`], [`Key::values`] and [`Value::read_data`].
 
 mod bytes;
+pub mod comdlg32;
 mod data;
 mod deleted;
 mod hive;

@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::comdlg32::{dialogs, item_list_problem};
 use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
 use ys_registry_parser::ntuser::{
     classes_sid, mui_cache, profile_name, recent_docs, user_assist, user_assist_data,
@@ -57,6 +58,22 @@ fn usrclass() -> &'static [u8] {
 fn ntuser_wsl() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER-WSL.DAT"))
+}
+
+/// Plaso's NTUSER.DAT, with the common dialogs' history, unpacked once.
+fn plaso_ntuser() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| {
+        let path = format!(
+            "{}/tests/fixtures/plaso/NTUSER.DAT.gz",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut data = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_end(&mut data)
+            .unwrap();
+        data
+    })
 }
 
 /// Flip bytes of `data` past its base block.
@@ -114,7 +131,7 @@ fn read_all(data: Vec<u8>) {
         shell_bags(&hive),
         mui_cache(&hive),
     );
-    let _ = (accounts(&hive), machine_sid(&hive));
+    let _ = (accounts(&hive), machine_sid(&hive), dialogs(&hive));
     let _ = (installed::software(&hive), installed::ntuser(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
@@ -235,6 +252,7 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (item_list_problem(&rest), item_list_problem(&bytes));
         let _ = (usb::mount_target(&rest), usb::mount_target(&bytes));
         let text = String::from_utf8_lossy(&rest);
         let _ = (unpack_guid(&text), install_date(&text), package_name(&text));
@@ -242,5 +260,22 @@ proptest! {
         let _ = (usb::device_ref(&text), usb::storage_name(&text), usb::vid_pid(&text));
         let _ = usb::serial("USBSTOR", &text);
         let _ = device_path(&String::from_utf8_lossy(&rest));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+    /// The common dialogs' keys and values damaged: read without a panic.
+    #[test]
+    fn a_damaged_comdlg32(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(plaso_ntuser().to_vec(), flips), &[])
+        {
+            for entry in dialogs(&hive).map(|d| d.0).unwrap_or_default() {
+                let _ = entry.shell_items.as_deref().map(item_list_problem);
+            }
+        }
     }
 }
