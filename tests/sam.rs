@@ -6,7 +6,7 @@
 use std::io::Read;
 
 use ys_registry_parser::Hive;
-use ys_registry_parser::sam::{NEVER, account_flag_names, accounts};
+use ys_registry_parser::sam::{NEVER, account_flag_names, accounts, machine_sid};
 
 fn sam() -> Hive {
     let path = format!(
@@ -73,4 +73,13 @@ fn local_accounts() {
     assert_eq!(account_flag_names(f.flags), ["normal_account"]);
     assert_eq!((f.logon_count, f.country_code, f.code_page), (4, 1, 1252));
     assert_eq!(user.hidden_from_logon_ui, None);
+}
+
+#[test]
+fn the_computers_sid() {
+    // the SID its accounts' security descriptors and the Administrators alias name
+    assert_eq!(
+        machine_sid(&sam()).as_deref(),
+        Some("S-1-5-21-1760460187-1592185332-161725925")
+    );
 }

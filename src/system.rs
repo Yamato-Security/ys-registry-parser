@@ -1,5 +1,6 @@
-//! The `SYSTEM` hive: its control sets (`Select`), the computer's name, and its services with
-//! their start, type, account, DLL and failure actions.
+//! The `SYSTEM` hive: its control sets (`Select`), the computer's name, its services with their
+//! start, type, account, DLL and failure actions, and when each user last ran each program as
+//! the Background and Desktop Activity Moderators recorded it (`bam`).
 //!
 //! A service's `FailureActions` is a `SERVICE_FAILURE_ACTIONS` as the Service Control Manager
 //! writes it: the reset period, two fields that say whether a reboot message and a command are
@@ -7,7 +8,7 @@
 //! a serialized pointer field that is not needed to locate the stored actions, then the
 //! `SC_ACTION`s (type and delay in milliseconds), 8 bytes each.
 
-use crate::bytes::u32_at;
+use crate::bytes::{u32_at, u64_at};
 use crate::data::{Data, ValueType, decode};
 use crate::hive::{Hive, Key, Status, Value};
 
@@ -453,6 +454,157 @@ pub fn error_control_name(error_control: u32) -> String {
     }
 }
 
+/// Which moderator recorded a program's last run: the Background Activity Moderator (`bam`)
+/// or the Desktop Activity Moderator (`dam`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Moderator {
+    /// `Services\bam`.
+    Bam,
+    /// `Services\dam`.
+    Dam,
+}
+
+impl Moderator {
+    /// `bam` or `dam`: its service's name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Moderator::Bam => "bam",
+            Moderator::Dam => "dam",
+        }
+    }
+}
+
+/// Where a control set keeps each user's key, under `Services\bam` and `Services\dam`:
+/// `State\UserSettings` (Windows 10 1809 and later), then `UserSettings` (1709 to 1803).
+const MODERATOR_LAYOUTS: [&str; 2] = [r"State\UserSettings", "UserSettings"];
+
+/// Values of a user's key that are not programs.
+const MODERATOR_SETTINGS: [&str; 2] = ["Version", "SequenceNumber"];
+
+/// When a program last ran, as BAM or DAM recorded it for a user: a value of the user's key
+/// (named after the user's SID) under `Services\bam\State\UserSettings`,
+/// `Services\bam\UserSettings` or the same under `Services\dam`. The value's name is the
+/// program; the first 8 bytes of its `REG_BINARY` data are the time it last ran (FILETIME).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BamEntry {
+    /// `bam` or `dam`.
+    pub moderator: Moderator,
+    /// The user's key, from the control set: `ControlSet001\Services\bam\State\UserSettings\S-1-5-…`.
+    pub key_path: String,
+    /// The key's name: the user's SID.
+    pub user_sid: String,
+    /// When the key was last written (FILETIME).
+    pub key_last_written: u64,
+    /// The value's name, as Windows wrote it: a `\Device\HarddiskVolumeN\…` path (see
+    /// [`device_path`]) or a packaged app's ID.
+    pub program: String,
+    /// When the program last ran (FILETIME); `None` when the data doesn't hold a time.
+    pub last_run: Option<u64>,
+    /// The data, when it doesn't hold a time: not `REG_BINARY`, shorter than 8 bytes, or not
+    /// read whole.
+    pub data_raw: Option<Vec<u8>>,
+    /// Whether the transaction logs' replay wrote the key or the value.
+    pub replayed: bool,
+    /// What couldn't be read.
+    pub problems: Vec<String>,
+}
+
+/// The programs BAM and DAM recorded in control set `set` (`ControlSet001` for 1): `bam`, then
+/// `dam`; in each, `State\UserSettings`, then `UserSettings`; their users' keys and values in
+/// the hive's order. Also what keeps others from being read. `None` when the control set has
+/// none of these keys.
+#[must_use]
+pub fn bam(hive: &Hive, set: u32) -> Option<(Vec<BamEntry>, Vec<String>)> {
+    let set_name = control_set_name(set);
+    let mut found = false;
+    let mut entries = Vec::new();
+    let mut problems = Vec::new();
+    for moderator in [Moderator::Bam, Moderator::Dam] {
+        for layout in MODERATOR_LAYOUTS {
+            let path = format!(r"{set_name}\Services\{}\{layout}", moderator.name());
+            let Some(settings) = hive.key(&path) else {
+                continue;
+            };
+            found = true;
+            let (users, why) = settings.subkeys();
+            problems.extend(why.into_iter().map(|w| format!("{path}: {w}")));
+            for user in &users {
+                let key_path = format!(r"{path}\{}", user.name());
+                let (values, why) = user.values();
+                problems.extend(why.into_iter().map(|w| format!("{key_path}: {w}")));
+                let template = BamEntry {
+                    moderator,
+                    key_path,
+                    user_sid: user.name(),
+                    key_last_written: user.last_written(),
+                    program: String::new(),
+                    last_run: None,
+                    data_raw: None,
+                    replayed: user.status() == Status::Replayed,
+                    problems: Vec::new(),
+                };
+                entries.extend(
+                    values
+                        .iter()
+                        .filter(|value| {
+                            !MODERATOR_SETTINGS
+                                .iter()
+                                .any(|name| value.name().eq_ignore_ascii_case(name))
+                        })
+                        .map(|value| bam_entry(&template, value)),
+                );
+            }
+        }
+    }
+    found.then_some((entries, problems))
+}
+
+/// The entry of `value`, in the user's key `template` describes.
+fn bam_entry(template: &BamEntry, value: &Value) -> BamEntry {
+    let mut entry = BamEntry {
+        program: value.name(),
+        replayed: template.replayed || value.status() == Status::Replayed,
+        ..template.clone()
+    };
+    let (bytes, read_problem) = value.read_data();
+    let why = read_problem
+        .or_else(|| {
+            (value.value_type() != ValueType::Binary)
+                .then(|| format!("is {}, not REG_BINARY", value.value_type().name()))
+        })
+        .or_else(|| {
+            (bytes.len() < 8).then(|| {
+                format!(
+                    "{} data bytes, fewer than the 8 of a time it last ran",
+                    bytes.len()
+                )
+            })
+        });
+    match why {
+        Some(why) => {
+            entry.problems.push(why);
+            entry.data_raw = Some(bytes);
+        }
+        None => entry.last_run = u64_at(&bytes, 0),
+    }
+    entry
+}
+
+/// The device a program's path is on, and the path on it: `\Device\HarddiskVolume3` and
+/// `\Windows\explorer.exe` for `\Device\HarddiskVolume3\Windows\explorer.exe`. `None` for a
+/// name that isn't under `\Device\` (a packaged app's ID).
+#[must_use]
+pub fn device_path(program: &str) -> Option<(&str, &str)> {
+    const DEVICE: &str = r"\Device\";
+    if !program.get(..DEVICE.len())?.eq_ignore_ascii_case(DEVICE) {
+        return None;
+    }
+    let after = &program[DEVICE.len()..];
+    let end = after.find('\\').map_or(program.len(), |i| DEVICE.len() + i);
+    (end > DEVICE.len()).then(|| (&program[..end], &program[end..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +678,31 @@ mod tests {
         );
         bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(failure_actions(&bytes).is_err());
+    }
+
+    #[test]
+    fn device_paths() {
+        assert_eq!(
+            device_path(r"\Device\HarddiskVolume3\Windows\explorer.exe"),
+            Some((r"\Device\HarddiskVolume3", r"\Windows\explorer.exe"))
+        );
+        assert_eq!(
+            device_path(r"\device\Mup\server\share\tool.exe"),
+            Some((r"\device\Mup", r"\server\share\tool.exe"))
+        );
+        assert_eq!(
+            device_path(r"\Device\HarddiskVolume1"),
+            Some((r"\Device\HarddiskVolume1", ""))
+        );
+        assert_eq!(device_path(r"\Device\"), None);
+        assert_eq!(device_path(r"\Device\\x"), None);
+        assert_eq!(
+            device_path("Microsoft.Windows.Photos_8wekyb3d8bbwe!App"),
+            None
+        );
+        assert_eq!(device_path(r"\Dev"), None);
+        assert_eq!(device_path(r"\Devicé\x"), None);
+        assert_eq!(Moderator::Dam.name(), "dam");
     }
 
     #[test]
