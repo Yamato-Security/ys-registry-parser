@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Audit-policy decoding reserves its unused word even with corrupt counts, rejects unsupported
+  revisions, reports empty values and accepts nonzero legacy BOOLEAN values. (@YamatoSecurity)
 - Diagnose Office macro and trust-policy values stored with a non-DWORD type while retaining
   their original bytes and readable data. (@YamatoSecurity)
 - Office retains malformed trusted-location and multi-string bytes, diagnoses invalid timestamps,
@@ -164,3 +166,9 @@ First version. (@YamatoSecurity)
   whether its macros were enabled; and the macro settings (`VBAWarnings`,
   `BlockContentExecutionFromInternet`, `AccessVBOM`) and `Trusted Locations` of the user and by
   policy. (@YamatoSecurity)
+- `audit_policy`: the audit policy in force in a `SECURITY` hive's `Policy\PolAdtEv`
+  (`audit_policy`, `AuditPolicy`), decoded by its layout (`audit_events`, `AuditEvents`,
+  `Layout`): a setting per subcategory (Windows Vista and later, in Windows' own order of each
+  category's subcategories) or per category (Windows XP and 2003, with whether auditing is on).
+  Each `AuditSetting` has its category, subcategory, GUID, message ID (`subcategory_id`) and
+  `Setting`. (@YamatoSecurity)

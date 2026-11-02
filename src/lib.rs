@@ -25,6 +25,7 @@
 //! [`Key::subkeys`], [`Key::values`] and [`Value::read_data`].
 
 pub mod app_history;
+pub mod audit_policy;
 mod bytes;
 pub mod comdlg32;
 mod data;

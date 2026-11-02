@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use proptest::prelude::*;
 use ys_registry_parser::app_history;
+use ys_registry_parser::audit_policy::{audit_events, audit_policy};
 use ys_registry_parser::comdlg32::{dialogs, item_list_problem};
 use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
 use ys_registry_parser::mru::mru_lists;
@@ -213,6 +214,11 @@ fn read_all(data: Vec<u8>) {
         security_settings::software(&hive),
         security_settings::ntuser(&hive),
     );
+    if let Some(policy) = audit_policy(&hive) {
+        for setting in &policy.events.settings {
+            let _ = (setting.subcategory_id(), setting.setting.name());
+        }
+    }
     let machine = MachineClasses::read(&hive);
     let _ = (feature_usage(&hive), feature_usage_created(&hive));
     let _ = (recent_apps(&hive), taskband(&hive), programs_cache(&hive));
@@ -304,12 +310,6 @@ proptest! {
         }
     }
 
-    #[test]
-    fn a_damaged_security_hive(
-        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)
-    ) {
-        read_all(damage(security().to_vec(), flips));
-    }
 
     /// Third-party tools' keys and values damaged: read without a panic.
     #[test]
@@ -321,6 +321,13 @@ proptest! {
                 let _ = app_history::ntuser(&hive);
             }
         }
+    }
+
+    #[test]
+    fn a_damaged_security_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)
+    ) {
+        read_all(damage(security().to_vec(), flips));
     }
 
     #[test]
@@ -383,6 +390,10 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        // PolAdtEv: any bytes, and bytes that start as the subcategory layout's header does
+        let mut adt = vec![0, 1, 0, 0, version as u8, 0, 0, 0];
+        adt.extend(&rest);
+        let _ = (audit_events(&rest), audit_events(&adt));
         let _ = (trust_record(&rest), mru_item(&String::from_utf8_lossy(&rest)));
         let _ = (sid(&rest), sid(&bytes));
         let _ = TransitionDate::from_bytes(&rest).map(|d| d.describe());
