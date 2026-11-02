@@ -52,6 +52,14 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `shellbags`: the `BagMRU` trees of `UsrClass.dat` and `NTUSER.DAT` (`shell_bags`, `ShellBag`,
+  `LOCATIONS`: `Shell` and Windows XP's `ShellNoRoam`, and the 32-bit Explorer's under
+  `Wow6432Node`): every item from the top of each tree down, in `MRUListEx` order, with its
+  parent item, its place in the list, its subkey's `NodeSlot` and last-write time, the
+  last-write time of the key its value is in, and its shell item list's bytes (decode them with
+  a shell item parser). A listed value that isn't there, a value or subkey the list doesn't
+  name, a subkey without its value (the items under it are still read), and subkey lists that
+  loop are reported. (@YamatoSecurity)
 - `system::bam` (`BamEntry`, `Moderator`): when each user last ran each program as the Background
   and Desktop Activity Moderators recorded it, from `Services\bam` and `Services\dam` in both
   layouts (`State\UserSettings` and `UserSettings`), and `device_path`, which splits a

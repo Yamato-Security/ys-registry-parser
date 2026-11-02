@@ -80,6 +80,17 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+- ShellBags (`shellbags`): the folders a user opened in Explorer, from the `BagMRU` trees of
+  `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell\BagMRU`, and the 32-bit
+  Explorer's under `Wow6432Node`) and `NTUSER.DAT` (`Software\Microsoft\Windows\Shell\BagMRU`,
+  and Windows XP's `ShellNoRoam\BagMRU`). `shell_bags` gives every item from the top of each tree
+  down, in `MRUListEx` order (an item, then the items under it): the item it is under, its place
+  in its parent's list, its subkey's `NodeSlot` (its `Bags\N` key) and last-write time, the
+  last-write time of the key its value is in (which dates the opening of the key's most recent
+  item only), and its shell item list's bytes, for a shell item parser to decode (a link's
+  target ID list has the same items). A listed value that isn't there, a value or subkey the
+  list doesn't name, and a subkey without its value (the items under it are still read) are
+  reported, and subkey lists that loop are read once.
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
@@ -225,6 +236,13 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- ShellBags on 18 public `UsrClass.dat` and `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's, Windows XP to 11; 252 items in 8 of them): the same
+  keys and values as [libfwsi](https://github.com/libyal/libfwsi) with libregf, Plaso's
+  `bagmru`, regipy's `shellbags_usrclass` and `shellbags_ntuser` (which don't read
+  `ShellNoRoam`) and dissect.target's `shellbags` read, in the same `MRUListEx` order as the
+  first three, with the same last-write times as regipy; regipy's `node_slot` is the `NodeSlot`
+  of the key the value is in, not of the item's own key.
 - The Task Scheduler's cache on 7 public `SOFTWARE` hives (regipy's Windows 7 and the DFIR
   Artifact Museum's Windows 10, 11, Server 2012 R2 and Server 2022 ones, the dirty ones with
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
@@ -276,7 +294,10 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
   way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`); accounts
   whose `F`, `V` and `Names` disagree or are cut short, with a password hint, a Microsoft account
-  and `UserDontShowInLogonUI`; autostarts in regipy's `SYSTEM`, `NTUSER.DAT` and `UsrClass.dat`,
+  and `UserDontShowInLogonUI`; regipy's `UsrClass.dat` ShellBags as it is and with its logs
+  (order, parents, `NodeSlot`s, what the logs add), and `BagMRU` trees built with a missing,
+  an unlisted and a non-binary value, a subkey without its value, a `NodeSlot` of the wrong type,
+  `ShellNoRoam`, and subkey lists that loop; autostarts in regipy's `SYSTEM`, `NTUSER.DAT` and `UsrClass.dat`,
   and in built hives with one of each kind, `StartupApproved` entries enabled, disabled and
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup

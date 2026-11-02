@@ -10,6 +10,7 @@ use ys_registry_parser::ntuser::{
 };
 use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, machine_sid, user_f, user_v};
+use ys_registry_parser::shellbags::shell_bags;
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, bam, computer_name, device_path, services};
 use ys_registry_parser::usb;
@@ -42,6 +43,12 @@ fn system_win10() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// The UsrClass.dat hive (`BagMRU` trees), unpacked once.
+fn usrclass() -> &'static [u8] {
+    static USRCLASS: OnceLock<Vec<u8>> = OnceLock::new();
+    USRCLASS.get_or_init(|| fixture("UsrClass.dat"))
 }
 
 /// Flip bytes of `data` past its base block.
@@ -93,7 +100,11 @@ fn read_all(data: Vec<u8>) {
         users: &users,
     });
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
-    let _ = (user_assist(&hive), user_assist_settings(&hive));
+    let _ = (
+        user_assist(&hive),
+        user_assist_settings(&hive),
+        shell_bags(&hive),
+    );
     let _ = (accounts(&hive), machine_sid(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
@@ -149,6 +160,13 @@ proptest! {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_damaged_usrclass_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        read_all(damage(usrclass().to_vec(), flips));
     }
 
     #[test]
