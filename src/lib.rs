@@ -25,18 +25,22 @@
 //! [`Key::subkeys`], [`Key::values`] and [`Value::read_data`].
 
 mod bytes;
+pub mod comdlg32;
 mod data;
 mod deleted;
 mod digest;
 mod hive;
+pub mod installed;
 mod log;
 pub mod ntuser;
 pub mod persistence;
 mod recover;
 pub mod remote_access;
 pub mod sam;
+pub mod shellbags;
 pub mod software;
 pub mod system;
+pub mod usb;
 
 use std::path::Path;
 

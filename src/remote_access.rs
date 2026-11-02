@@ -22,6 +22,7 @@
 //! An SSH host key's fingerprint is OpenSSH's: `SHA256:` and the Base64 of the SHA-256 digest of
 //! the key's SSH wire encoding, which is built from the numbers PuTTY and WinSCP keep.
 
+use crate::bytes::upcase_name;
 use crate::digest::{base64_unpadded, sha256};
 use crate::hive::{Hive, Key, Status, Value};
 use crate::system::{number, string};
@@ -249,6 +250,20 @@ impl Connection {
     /// Add a detail.
     fn detail(&mut self, name: &str, value: impl Into<String>) {
         self.details.push((name.to_owned(), value.into()));
+    }
+
+    /// Test presence without sending secret data through string-error diagnostics.
+    fn has_stored_value(&mut self, key: &Key, name: &str) -> bool {
+        let Some(value) = key.value(name) else {
+            return false;
+        };
+        self.replayed |= value.status() == Status::Replayed;
+        let (bytes, problem) = value.read_data();
+        if let Some(why) = problem {
+            self.problems
+                .push(format!("{name}: {why}; contents omitted"));
+        }
+        bytes.iter().any(|&b| b != 0)
     }
 }
 
@@ -564,7 +579,7 @@ fn putty_session(session: &Key, record: &mut Connection) {
     {
         record.detail("LogFileName", file);
     }
-    let proxy_password = record.text(session, "ProxyPassword").is_some();
+    let proxy_password = record.has_stored_value(session, "ProxyPassword");
     record.password_stored = Some(proxy_password);
     if proxy_password {
         record.detail("StoredPasswords", "ProxyPassword");
@@ -698,12 +713,7 @@ fn winscp_session(session: &Key, record: &mut Connection) {
     // stored passwords are present or not; their data is never read further
     let stored: Vec<&str> = WINSCP_SECRETS
         .into_iter()
-        .filter(|name| {
-            session.value(name).is_some_and(|value| {
-                record.replayed |= value.status() == Status::Replayed;
-                value.read_data().0.iter().any(|&b| b != 0)
-            })
-        })
+        .filter(|name| record.has_stored_value(session, name))
         .collect();
     record.password_stored = Some(!stored.is_empty());
     if !stored.is_empty() {
@@ -969,7 +979,10 @@ pub fn mru_list(text: &str) -> (Vec<char>, Vec<String>) {
     let mut letters = Vec::new();
     let mut problems = Vec::new();
     for c in text.chars() {
-        if letters.contains(&c) {
+        if letters
+            .iter()
+            .any(|letter: &char| upcase_name(&letter.to_string()) == upcase_name(&c.to_string()))
+        {
             problems.push(format!("MRUList: {c} is listed twice"));
         } else {
             letters.push(c);
@@ -1030,7 +1043,11 @@ fn map_network_drive_mru(hive: &Hive, records: &mut Vec<Connection>, problems: &
     for (position, letter) in order.iter().enumerate() {
         let position = u32::try_from(position).ok();
         let name = letter.to_string();
-        if let Some(at) = entries.iter().position(|v| v.name() == name) {
+        if let Some(at) = entries
+            .iter()
+            .enumerate()
+            .position(|(at, v)| !used[at] && upcase_name(&v.name()) == upcase_name(&name))
+        {
             used[at] = true;
             records.push(record_of(entries[at], position));
         } else {
