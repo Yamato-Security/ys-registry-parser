@@ -19,6 +19,7 @@
 use std::fmt::Write as _;
 
 use crate::bytes::{u16_at, u32_at, u64_at};
+use crate::data::{ValueType, filetime};
 use crate::hive::{Hive, Key, Status};
 
 /// Where the secrets are, under the `SECURITY` hive's root.
@@ -193,9 +194,12 @@ fn secret_value(
         if let Some(v) = values.iter().find(|v| v.name().is_empty()) {
             *replayed |= v.status() == Status::Replayed;
             match v.data() {
-                Ok(bytes) if bytes.len() == 8 => {
-                    found.set = u64_at(&bytes, 0).filter(|&t| t != 0);
-                }
+                Ok(bytes) if bytes.len() == 8 => match u64_at(&bytes, 0).filter(|&t| t != 0) {
+                    Some(t) if filetime(t).is_none() => {
+                        problems.push(format!(r"{path}\{time}: FILETIME 0x{t:016x} is past 9999"));
+                    }
+                    value => found.set = value,
+                },
                 Ok(bytes) => problems.push(format!(
                     r"{path}\{time}: {} bytes, not a FILETIME ({})",
                     bytes.len(),
@@ -267,7 +271,8 @@ pub struct CachedLogons {
     pub key_last_written: u64,
     /// The slots (`NL$1` …).
     pub slots: usize,
-    /// The slots whose record names a user.
+    /// The validated slots whose header names a user. When problems exist, this count
+    /// does not classify the damaged slots as either empty or occupied.
     pub in_use: usize,
     /// `NL$Control`'s count of the slots Windows keeps (`CachedLogonsCount`, 10 by default).
     pub control_count: Option<u32>,
@@ -300,6 +305,13 @@ pub fn cached_logons(security: &Hive) -> Option<CachedLogons> {
         let name = value.name();
         if name.eq_ignore_ascii_case("NL$Control") {
             found.replayed |= value.status() == Status::Replayed;
+            if value.value_type() != ValueType::Binary {
+                found.problems.push(format!(
+                    r"{CACHE}\NL$Control: is {}, not REG_BINARY",
+                    value.value_type().name()
+                ));
+                continue;
+            }
             match value.data() {
                 Ok(bytes) => {
                     found.control_count = u32_at(&bytes, 4);
@@ -315,11 +327,34 @@ pub fn cached_logons(security: &Hive) -> Option<CachedLogons> {
         } else if slot_name(&name) {
             found.slots += 1;
             found.replayed |= value.status() == Status::Replayed;
-            // the user name's length, the first u16 of the record's clear header
+            if value.value_type() != ValueType::Binary {
+                found.problems.push(format!(
+                    r"{CACHE}\{name}: is {}, not REG_BINARY",
+                    value.value_type().name()
+                ));
+                continue;
+            }
+            // Validate the 96-byte clear NL_RECORD header before using its first u16.
+            // Diagnostics never include the encrypted payload or its bytes.
             match value.read_data() {
                 (bytes, None) => {
-                    if u16_at(&bytes, 0).is_some_and(|length| length > 0) {
-                        found.in_use += 1;
+                    if bytes.len() < 96 {
+                        found.problems.push(format!(
+                            r"{CACHE}\{name}: {} bytes, too short for a cached-logon header",
+                            bytes.len()
+                        ));
+                    } else if let Some(length) = u16_at(&bytes, 0) {
+                        if !length.is_multiple_of(2) {
+                            found.problems.push(format!(
+                                r"{CACHE}\{name}: odd UTF-16 user-name length {length}"
+                            ));
+                        } else if length > 0 {
+                            if usize::from(length) > bytes.len() - 96 {
+                                found.problems.push(format!(r"{CACHE}\{name}: user-name length exceeds the encrypted payload size"));
+                            } else {
+                                found.in_use += 1;
+                            }
+                        }
                     }
                 }
                 (_, Some(why)) => found.problems.push(format!(r"{CACHE}\{name}: {why}")),
