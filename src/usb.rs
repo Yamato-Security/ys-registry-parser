@@ -927,8 +927,9 @@ fn names(a: Option<&DeviceRef>, b: Option<&DeviceRef>) -> bool {
 }
 
 /// Join the devices with their volumes: one record per device and volume GUID of its (a device
-/// without one: one record), then one per volume of `MountedDevices` no device has, per volume
-/// only users' `MountPoints2` have, and per device only `SOFTWARE` names.
+/// without one: one record), then one per volume of `MountedDevices` no device has, per drive
+/// letter whose data no volume GUID value has, per volume only users' `MountPoints2` have, and per
+/// device only `SOFTWARE` names.
 ///
 /// A USB storage device's volumes are the `\??\Volume{GUID}` values whose data is a path that
 /// names it, and their drive letters the `\DosDevices\X:` values with the same data. Volume
@@ -1022,6 +1023,21 @@ impl Join<'_, '_> {
     fn unlinked_volumes(&mut self, out: &mut Vec<History>) {
         for (i, m) in self.sources.mounted.iter().enumerate() {
             if self.used_volumes[i] || m.volume_guid.is_none() {
+                continue;
+            }
+            let mut record = History::new(None, m.reference.clone());
+            self.software(&mut record, None, storage_of(m.reference.as_ref()));
+            add_volume(&mut record, self.sources, i);
+            out.push(record);
+        }
+        // drive letters whose data no volume GUID value has (a GPT system volume, often)
+        for (i, m) in self.sources.mounted.iter().enumerate() {
+            let has_volume = self
+                .sources
+                .mounted
+                .iter()
+                .any(|v| v.volume_guid.is_some() && v.data == m.data);
+            if m.drive_letter.is_none() || has_volume {
                 continue;
             }
             let mut record = History::new(None, m.reference.clone());

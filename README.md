@@ -135,7 +135,8 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `NTUSER.DAT`, `MountPoints2` (`mount_points`: the volumes and shares a user had mounted, with
   `_LabelFromReg`). `history` joins them: one record per device and volume of its (letters,
   names, serial numbers, the users who had it), then the volumes no device key names (an internal
-  disk's, or a removed device's whose `Enum` key is gone), and the devices only `SOFTWARE` names.
+  disk's, or a removed device's whose `Enum` key is gone), drive letters without a volume GUID
+  value, and the devices only `SOFTWARE` names.
   A property that isn't a FILETIME keeps its bytes in a problem.
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem

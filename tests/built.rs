@@ -1972,6 +1972,8 @@ fn usb_history_joins_devices_volumes_names_and_users() {
     );
     let mut mbr = 0x1234_5678_u32.to_le_bytes().to_vec();
     mbr.extend(1_048_576_u64.to_le_bytes());
+    let mut gpt = b"DMIO:ID:".to_vec();
+    gpt.extend([7u8; 16]);
     let mut system = Tree::default();
     system
         .sz(
@@ -2014,7 +2016,9 @@ fn usb_history_joins_devices_volumes_names_and_users() {
             "#{eeeeeeee-0000-0000-0000-000000000005}",
             3,
             &mbr,
-        );
+        )
+        // a GPT system volume's letter, without a volume GUID value
+        .set("MountedDevices", r"\DosDevices\F:", 3, &gpt);
     let mut software = Tree::default();
     let pd = r"Microsoft\Windows Portable Devices\Devices";
     let emd = r"Microsoft\Windows NT\CurrentVersion\EMDMgmt";
@@ -2107,6 +2111,8 @@ fn usb_history_joins_devices_volumes_names_and_users() {
             r#"volume  None Some("{bbbbbbbb-0000-0000-0000-000000000002}") C [] [] [] ["MountedDevices"] []"#,
             // a USB storage device whose Enum key is gone, known by its volume and ReadyBoost
             r#"volume Disk&Ven_Gone&Prod_Drive&Rev_9|GONE77&0 None Some("{cccccccc-0000-0000-0000-000000000003}")  ["GONE"] [42] [] ["EMDMgmt", "MountedDevices"] []"#,
+            // F:, a drive letter without a volume GUID value
+            r#"volume  None None F [] [] [] ["MountedDevices"] []"#,
             // a volume only users had
             r#"volume  None Some("{dddddddd-0000-0000-0000-000000000004}")  [] [] ["alice", "bob"] ["MountPoints2"] []"#,
             // a phone only SOFTWARE names, and a ReadyBoost device of no USB storage
@@ -2130,7 +2136,7 @@ fn usb_history_joins_devices_volumes_names_and_users() {
         ]
     );
     assert_eq!(
-        history[5].keys,
+        history[6].keys,
         [
             format!(r"NTUSER.DAT (alice) {mp2}\{vol_d}"),
             format!(r"NTUSER.DAT (bob) {mp2}\{vol_d}"),
