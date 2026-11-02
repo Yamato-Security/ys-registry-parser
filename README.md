@@ -73,6 +73,15 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+- The Open and Save As dialogs' history in `NTUSER.DAT` (`comdlg32`): `dialogs` gives every
+  entry of `ComDlg32`'s `OpenSavePidlMRU` (a subkey per extension, and `*`), `LastVisitedPidlMRU`,
+  `LastVisitedPidlMRULegacy`, `CIDSizeMRU` and `FirstFolder`, and of Windows XP's `OpenSaveMRU`
+  and `LastVisitedMRU`, in the order of its key's `MRUListEx` (numbered values) or `MRUList`
+  (lettered values, a string of their letters), with the key's last-write time (which dates its
+  most recent entry only): the program that showed the dialog, a path stored as text, or the
+  shell item list (the file opened or saved, or the folder last used), kept as its bytes for a
+  shell item parser; `item_list_problem` checks a list's layout. Values the list names but the key
+  hasn't, values it doesn't name, and data that doesn't decode (kept as its bytes) are reported.
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
@@ -195,6 +204,11 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- The common dialogs' lists on the 9 public `NTUSER.DAT` hives with them (regipy's, Plaso's,
+  notatin's and the DFIR Artifact Museum's, Windows XP to 10; 1,398 entries in all 7 lists): the
+  same entries in the same order, with the same programs and paths, as Plaso's `mrulist` and
+  `mrulistex` plugins. (regipy's `comdlg32` finds none on these hives: it reads the values' data
+  as hex text.)
 - The Task Scheduler's cache on 7 public `SOFTWARE` hives (regipy's Windows 7 and the DFIR
   Artifact Museum's Windows 10, 11, Server 2012 R2 and Server 2022 ones, the dirty ones with
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
@@ -234,7 +248,10 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
-  machine's; random damage, and random `Actions`, `F` and `V`.
+  machine's; Plaso's `NTUSER.DAT` (the common dialogs' lists), and the lists built in each
+  layout with values missing, unlisted, of the wrong type or cut short, shell item lists cut short
+  or with bytes past their end, and `MRUList`s that repeat a letter or aren't strings; random
+  damage, and random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose
@@ -245,4 +262,5 @@ data cells the entry didn't write.
 Apache-2.0 (`LICENSE`). The transaction log replay comes from Yamato Security's
 [ys-shimcache-parser](https://github.com/Yamato-Security/ys-shimcache-parser) (Apache-2.0). The
 format is Maxim Suhanov's [Windows registry file format specification](https://github.com/msuhanov/regf)
-(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`).
+(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`),
+and Plaso's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`).

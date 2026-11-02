@@ -1836,3 +1836,423 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
 }
+
+/// A shell item list: each item's bytes after its size, ended by a size of 0.
+fn shell_items(items: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for item in items {
+        out.extend((item.len() as u16 + 2).to_le_bytes());
+        out.extend(*item);
+    }
+    out.extend([0, 0]);
+    out
+}
+
+/// UTF-16 strings, each with its NUL, one after the other.
+fn strings(texts: &[&str]) -> Vec<u8> {
+    texts.iter().flat_map(|t| utf16z(t)).collect()
+}
+
+/// An entry's list, extension, place, value, program, path and problems.
+type Dialog<'a> = (
+    &'static str,
+    Option<&'a str>,
+    Option<u32>,
+    &'a str,
+    Option<&'a str>,
+    Option<&'a str>,
+    Vec<String>,
+);
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn common_dialog_lists_of_each_layout() {
+    use ys_registry_parser::comdlg32::{COMDLG32, dialogs};
+    let at = |list: &str| format!(r"{COMDLG32}\{list}");
+    // This PC, then a file entry
+    let file = shell_items(&[
+        b"\x1f\x50\xe0\x4f\xd0\x20\xea\x3a\x69\x10\xa2\xd8\x08\x00\x2b\x30\x30\x9d",
+        b"\x32\x00report.docx\x00",
+    ]);
+    let mut cut = file.clone();
+    cut.truncate(25);
+    let mut trailing = file.clone();
+    trailing.extend([0, 0, 7]);
+    let program_and = |program: &str, items: &[u8]| {
+        let mut b = utf16z(program);
+        b.extend(items);
+        b
+    };
+    let mut cid_size = utf16z("app.exe");
+    cid_size.resize(0x208, 0);
+    cid_size.extend([1, 2, 3, 4]);
+    let all = at(r"OpenSavePidlMRU\*");
+    let docx = at(r"OpenSavePidlMRU\docx");
+    let xp = at("OpenSaveMRU");
+    let mut t = Tree::default();
+    t.at(&at("OpenSavePidlMRU"));
+    // *: value 3 listed but missing, value 2 not listed
+    t.set(&all, "MRUListEx", 3, &mru(&[1, 0, 3]))
+        .set(&all, "0", 3, &file)
+        .set(&all, "1", 3, &trailing)
+        .set(&all, "2", 3, &file)
+        // docx: a list cut short, a list of the wrong type
+        .set(&docx, "MRUListEx", 3, &mru(&[0, 1]))
+        .set(&docx, "0", 3, &cut)
+        .set(&docx, "1", 1, &file)
+        // txt: no MRUListEx
+        .set(&at(r"OpenSavePidlMRU\txt"), "0", 3, &file)
+        .set(&at("LastVisitedPidlMRU"), "MRUListEx", 3, &mru(&[1, 0]))
+        .set(
+            &at("LastVisitedPidlMRU"),
+            "0",
+            3,
+            &program_and("notepad.exe", &file),
+        )
+        // a program's name without its NUL; a name without a list after it
+        .set(&at("LastVisitedPidlMRU"), "1", 3, &utf16z("cut.exe")[..8])
+        .set(&at("LastVisitedPidlMRU"), "2", 3, &utf16z("bare.exe"))
+        .set(&at("LastVisitedPidlMRULegacy"), "MRUListEx", 3, &mru(&[0]))
+        .set(
+            &at("LastVisitedPidlMRULegacy"),
+            "0",
+            3,
+            &program_and("old.exe", &[0, 0]),
+        )
+        .set(&at("CIDSizeMRU"), "MRUListEx", 3, &mru(&[0]))
+        .set(&at("CIDSizeMRU"), "0", 3, &cid_size)
+        .set(&at("FirstFolder"), "MRUListEx", 3, &mru(&[1, 0]))
+        .set(
+            &at("FirstFolder"),
+            "0",
+            3,
+            &strings(&[r"C:\Windows\explorer.exe", r"C:\Users\alice\Pictures"]),
+        )
+        .set(
+            &at("FirstFolder"),
+            "1",
+            3,
+            &strings(&[r"C:\Tools\x.exe", ""]),
+        )
+        // Windows XP: lettered values in MRUList order, in the key and an extension's subkey
+        .sz(&xp, "MRUList", "ba")
+        .sz(&xp, "a", r"C:\a.txt")
+        .sz(&xp, "b", r"D:\b.log")
+        .sz(&at(r"OpenSaveMRU\txt"), "MRUList", "A")
+        .sz(&at(r"OpenSaveMRU\txt"), "a", r"C:\a.txt")
+        // *: a letter listed but missing, a letter not listed, a path of the wrong type
+        .sz(&at(r"OpenSaveMRU\*"), "MRUList", "ca")
+        .set(&at(r"OpenSaveMRU\*"), "a", 3, &utf16z(r"C:\c.bin"))
+        .sz(&at(r"OpenSaveMRU\*"), "b", r"C:\d.bin")
+        .sz(&at("LastVisitedMRU"), "MRUList", "a")
+        .set(
+            &at("LastVisitedMRU"),
+            "a",
+            3,
+            &strings(&["notepad.exe", r"C:\Temp"]),
+        );
+    let hive = t.hive("ROOT");
+    let (entries, problems) = dialogs(&hive).unwrap();
+    assert_eq!(
+        problems,
+        [format!(
+            r"{COMDLG32}\OpenSavePidlMRU\txt: it has no MRUListEx: its items' order is unknown"
+        )]
+    );
+    let got: Vec<Dialog> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.list.name(),
+                e.extension.as_deref(),
+                e.mru_position,
+                e.value_name.as_str(),
+                e.program.as_deref(),
+                e.path.as_deref(),
+                e.problems.clone(),
+            )
+        })
+        .collect();
+    let none = Vec::new;
+    let one = |p: &str| vec![p.to_owned()];
+    let pidl = "OpenSavePidlMRU";
+    assert_eq!(
+        got,
+        [
+            (
+                pidl,
+                Some("*"),
+                Some(0),
+                "1",
+                None,
+                None,
+                one("3 bytes after the end of its shell item list")
+            ),
+            (pidl, Some("*"), Some(1), "0", None, None, none()),
+            (
+                pidl,
+                Some("*"),
+                Some(2),
+                "3",
+                None,
+                None,
+                one("MRUListEx lists value 3, which is not there")
+            ),
+            (
+                pidl,
+                Some("*"),
+                None,
+                "2",
+                None,
+                None,
+                one("MRUListEx doesn't list it")
+            ),
+            (
+                pidl,
+                Some("docx"),
+                Some(0),
+                "0",
+                None,
+                None,
+                one("its shell item at offset 20 of 16 bytes is cut short")
+            ),
+            (
+                pidl,
+                Some("docx"),
+                Some(1),
+                "1",
+                None,
+                None,
+                one("is REG_SZ, not REG_BINARY")
+            ),
+            (
+                pidl,
+                Some("txt"),
+                None,
+                "0",
+                None,
+                None,
+                one("MRUListEx doesn't list it")
+            ),
+            (
+                "LastVisitedPidlMRU",
+                None,
+                Some(0),
+                "1",
+                None,
+                None,
+                one("its program's name has no NUL: the data is cut short")
+            ),
+            (
+                "LastVisitedPidlMRU",
+                None,
+                Some(1),
+                "0",
+                Some("notepad.exe"),
+                None,
+                none()
+            ),
+            (
+                "LastVisitedPidlMRU",
+                None,
+                None,
+                "2",
+                Some("bare.exe"),
+                None,
+                vec![
+                    "MRUListEx doesn't list it".to_owned(),
+                    "no shell item list after the program's name".to_owned()
+                ]
+            ),
+            (
+                "LastVisitedPidlMRULegacy",
+                None,
+                Some(0),
+                "0",
+                Some("old.exe"),
+                None,
+                none()
+            ),
+            (
+                "CIDSizeMRU",
+                None,
+                Some(0),
+                "0",
+                Some("app.exe"),
+                None,
+                none()
+            ),
+            (
+                "FirstFolder",
+                None,
+                Some(0),
+                "1",
+                Some(r"C:\Tools\x.exe"),
+                None,
+                none()
+            ),
+            (
+                "FirstFolder",
+                None,
+                Some(1),
+                "0",
+                Some(r"C:\Windows\explorer.exe"),
+                Some(r"C:\Users\alice\Pictures"),
+                none()
+            ),
+            (
+                "OpenSaveMRU",
+                None,
+                Some(0),
+                "b",
+                None,
+                Some(r"D:\b.log"),
+                none()
+            ),
+            (
+                "OpenSaveMRU",
+                None,
+                Some(1),
+                "a",
+                None,
+                Some(r"C:\a.txt"),
+                none()
+            ),
+            (
+                "OpenSaveMRU",
+                Some("txt"),
+                Some(0),
+                "a",
+                None,
+                Some(r"C:\a.txt"),
+                none()
+            ),
+            (
+                "OpenSaveMRU",
+                Some("*"),
+                Some(0),
+                "c",
+                None,
+                None,
+                one("MRUList lists value c, which is not there")
+            ),
+            (
+                "OpenSaveMRU",
+                Some("*"),
+                Some(1),
+                "a",
+                None,
+                Some(r"C:\c.bin"),
+                one("is REG_BINARY, not REG_SZ")
+            ),
+            (
+                "OpenSaveMRU",
+                Some("*"),
+                None,
+                "b",
+                None,
+                Some(r"C:\d.bin"),
+                one("MRUList doesn't list it")
+            ),
+            (
+                "LastVisitedMRU",
+                None,
+                Some(0),
+                "a",
+                Some("notepad.exe"),
+                Some(r"C:\Temp"),
+                none()
+            ),
+        ]
+    );
+    // the shell items are kept, whole or not; the bytes of what doesn't decode too
+    assert_eq!(entries[1].shell_items.as_deref(), Some(&file[..]));
+    assert_eq!(entries[0].shell_items.as_deref(), Some(&trailing[..]));
+    assert_eq!(entries[0].data_raw.as_deref(), Some(&trailing[..]));
+    assert_eq!(entries[1].data_raw, None);
+    assert_eq!(entries[4].shell_items.as_deref(), Some(&cut[..]));
+    assert_eq!(entries[8].shell_items.as_deref(), Some(&file[..]));
+    assert_eq!(
+        entries[7].data_raw.as_deref(),
+        Some(&utf16z("cut.exe")[..8])
+    );
+    assert_eq!(entries[7].shell_items, None);
+    assert_eq!(entries[10].shell_items.as_deref(), Some(&[0u8, 0][..]));
+    assert!(entries[2].data_raw.is_none() && entries[2].shell_items.is_none());
+    assert_eq!(entries[0].key_path, all);
+    assert!(
+        entries
+            .iter()
+            .all(|e| e.key_last_written > 0 && !e.replayed)
+    );
+    // no ComDlg32 key
+    assert!(dialogs(&Tree::default().hive("ROOT")).is_none());
+}
+
+/// An entry's place, value, program and path.
+type Lettered<'a> = (Option<u32>, &'a str, Option<&'a str>, Option<&'a str>);
+
+#[test]
+fn mru_lists_that_dont_add_up() {
+    use ys_registry_parser::comdlg32::{COMDLG32, dialogs};
+    let xp = format!(r"{COMDLG32}\LastVisitedMRU");
+    let mut t = Tree::default();
+    // a letter listed twice, in another case; a list past its NUL; a value that isn't a letter
+    let mut list = utf16z("bAa");
+    list.extend(utf16z("z"));
+    t.set(&xp, "MRUList", 1, &list)
+        .set(&xp, "a", 3, &strings(&["one.exe", r"C:\One"]))
+        .set(&xp, "b", 3, &strings(&["two.exe"]))
+        .sz(&xp, "extra", "x")
+        .set(&xp, "MRUListEx", 3, &mru(&[0]));
+    let hive = t.hive("ROOT");
+    let (entries, problems) = dialogs(&hive).unwrap();
+    assert_eq!(
+        problems,
+        [
+            format!("{xp}: MRUList: characters past its NUL"),
+            format!("{xp}: MRUList: a is listed twice"),
+            format!(r#"{xp}: value "extra" is not a lettered item"#),
+            format!(r#"{xp}: value "MRUListEx" is not a lettered item"#),
+        ]
+    );
+    let got: Vec<Lettered> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.mru_position,
+                e.value_name.as_str(),
+                e.program.as_deref(),
+                e.path.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some(0), "b", Some("two.exe"), None),
+            (Some(1), "a", Some("one.exe"), Some(r"C:\One")),
+        ]
+    );
+    assert!(entries.iter().all(|e| e.problems.is_empty()));
+    // MRUList of the wrong type, and no MRUList at all
+    let mut t = Tree::default();
+    t.dword(&xp, "MRUList", 0x61)
+        .set(&xp, "a", 3, &strings(&["one.exe", r"C:\One"]));
+    let (entries, problems) = dialogs(&t.hive("ROOT")).unwrap();
+    assert_eq!(
+        problems,
+        [format!("{xp}: MRUList: is REG_DWORD, not REG_SZ")]
+    );
+    assert_eq!(entries[0].mru_position, Some(0));
+    let mut t = Tree::default();
+    t.set(&xp, "a", 3, &strings(&["one.exe", "C:"]));
+    let (entries, problems) = dialogs(&t.hive("ROOT")).unwrap();
+    assert_eq!(
+        problems,
+        [format!(
+            "{xp}: it has no MRUList: its items' order is unknown"
+        )]
+    );
+    assert_eq!(entries[0].problems, ["MRUList doesn't list it"]);
+}

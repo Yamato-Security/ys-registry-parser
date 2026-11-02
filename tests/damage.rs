@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::comdlg32::{dialogs, item_list_problem};
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
@@ -37,6 +38,22 @@ fn ntuser() -> &'static [u8] {
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
 }
 
+/// Plaso's NTUSER.DAT, with the common dialogs' history, unpacked once.
+fn plaso_ntuser() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| {
+        let path = format!(
+            "{}/tests/fixtures/plaso/NTUSER.DAT.gz",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut data = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_end(&mut data)
+            .unwrap();
+        data
+    })
+}
+
 /// Flip bytes of `data` past its base block.
 fn damage(mut data: Vec<u8>, flips: Vec<(usize, u8)>) -> Vec<u8> {
     for (at, byte) in flips {
@@ -67,7 +84,7 @@ fn read_all(data: Vec<u8>) {
     }
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
-    let _ = accounts(&hive);
+    let _ = (accounts(&hive), dialogs(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -114,6 +131,20 @@ proptest! {
     ) {
         read_all(damage(ntuser().to_vec(), flips));
     }
+
+    /// The common dialogs' keys and values damaged: read without a panic.
+    #[test]
+    fn a_damaged_comdlg32(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(plaso_ntuser().to_vec(), flips), &[])
+        {
+            for entry in dialogs(&hive).map(|d| d.0).unwrap_or_default() {
+                let _ = entry.shell_items.as_deref().map(item_list_problem);
+            }
+        }
+    }
 }
 
 proptest! {
@@ -138,5 +169,6 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (item_list_problem(&rest), item_list_problem(&bytes));
     }
 }
