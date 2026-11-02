@@ -56,7 +56,7 @@ fn search_terms_and_addresses() {
         && e.data_raw.is_none()
         && e.typed_time.is_none()
         && e.subkey.is_none()));
-    // 2012-04-03T22:31:58.5513397Z: when "alloy" was searched for
+    // 2012-04-04T15:45:18.5513397Z: when "alloy" was searched for
     assert_eq!(entries[0].key_last_written, 129_780_279_185_513_397);
     assert_eq!(
         entries[0].key_path,
