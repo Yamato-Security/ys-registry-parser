@@ -32,6 +32,7 @@ mod digest;
 mod hive;
 pub mod installed;
 mod log;
+pub mod mru;
 pub mod ntuser;
 pub mod persistence;
 mod recover;

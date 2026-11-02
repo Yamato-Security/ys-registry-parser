@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use proptest::prelude::*;
 use ys_registry_parser::comdlg32::{dialogs, item_list_problem};
 use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
+use ys_registry_parser::mru::mru_lists;
 use ys_registry_parser::ntuser::{
     classes_sid, mui_cache, profile_name, recent_docs, user_assist, user_assist_data,
     user_assist_settings,
@@ -270,6 +271,18 @@ proptest! {
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
     ) {
         read_all(damage(ntuser().to_vec(), flips));
+    }
+
+    /// The MRU lists' keys and values damaged, with `TypedURLsTime`: read without a panic.
+    #[test]
+    fn damaged_mru_lists(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(plaso_ntuser().to_vec(), flips), &[])
+        {
+            let _ = mru_lists(&hive);
+        }
     }
 }
 

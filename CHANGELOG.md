@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Preserve damaged WordWheelQuery bytes and report odd UTF-16 lengths or nonzero data after
+  the terminator instead of silently discarding them. (@YamatoSecurity)
 - Validate LSA string headers and Source OS calendar dates; report incomplete profile FILETIMEs
   instead of silently dropping them. Reuse the validated SAM machine-SID reader. (@YamatoSecurity)
 - Preserve diagnostics and original bytes for malformed installed-program values, including
@@ -121,3 +123,8 @@ First version. (@YamatoSecurity)
   (`LastLoggedOn`); `machine_sid`: a `SAM` hive's computer SID; `domains` (`Domains`): the account
   and primary domains, DNS names, domain GUID and computer account SID in a `SECURITY` hive's LSA
   policy; `sid` and `utc_offset`. (@YamatoSecurity)
+- `mru` (`mru_lists`, `MruEntry`, `MruList`, `acmru_search`): most-recently-used lists in
+  `NTUSER.DAT`: `RunMRU`, `TypedPaths`, `WordWheelQuery`, `TypedURLs` with `TypedURLsTime`,
+  Paint's and WordPad's recent files, and Windows XP's `ACMru`, each entry in its list's order.
+  `ntuser::mru_items` and `ntuser::mru_list_items` order a key's values by its `MRUListEx` or
+  `MRUList`. (@YamatoSecurity)
