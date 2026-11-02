@@ -121,6 +121,16 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
     `SOFTWARE`), each says whether it overrides the machine's registration of the same class or
     command.
 
+- The audit policy in force (`audit_policy`), from a `SECURITY` hive's `Policy\PolAdtEv`: which
+  security events the system was set to log. `audit_events` decodes the value by its layout:
+  Windows Vista and later keep a setting per subcategory (a header, the settings category by
+  category in Windows' own order of each category's subcategories, the index in their message
+  ID: `%%12548` is Logon/Logoff's index 4, Special Logon; then a table of how many each category
+  has), Windows XP and 2003 a setting per category and whether auditing is on. Each
+  `AuditSetting` has its category, subcategory, GUID, message ID (`subcategory_id`, as event 4719
+  gives it) and `Setting`: none, success, failure, or both. A value of an unknown layout or
+  size is a problem and keeps its bytes.
+
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
 that leads back to a key already read is read once; a base block whose root is not a key gives way
@@ -216,6 +226,15 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `ntuser_persistence`, and the same (none) `AppInit_DLLs` and IFEO debuggers as its
   `appinitdlls` and `image_file_execution_options`; on regipy's `SYSTEM`, the same LSA packages
   as its `lsa_packages`.
+- The audit policy on 8 public `SECURITY` hives (regipy's, the DFIR Artifact Museum's and one
+  more public test set; Windows 10, 11, Server 2012 R2 and 2022, with 59 and 56
+  subcategories): the same 466 settings as dissect's `auditpol`. The order of the subcategories
+  in each category is Windows' own, not their GUIDs': public events 4719 (System audit policy
+  was changed) give the message IDs of 34 subcategories with their GUIDs, and the decoded
+  settings are Windows'
+  documented defaults (Special Logon `success` and IPsec Quick Mode `none`, which GUID order
+  swaps). The Windows XP and 2003 layout is decoded from the `POLICY_AUDIT_EVENTS_INFO`
+  structure: no public hive of theirs was found.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
@@ -234,7 +253,10 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
-  machine's; random damage, and random `Actions`, `F` and `V`.
+  machine's; regipy's `SECURITY` (Windows 10's default audit policy); audit policies built in
+  both layouts, Server 2012 R2's 56 subcategories, with values past 3, categories and
+  subcategories Windows hasn't, counts that don't fit and unknown layouts; random damage (a
+  damaged `SECURITY` hive too), and random `Actions`, `F`, `V` and `PolAdtEv`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose

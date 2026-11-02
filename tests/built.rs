@@ -5,6 +5,7 @@
 
 use std::fmt::Write as _;
 
+use ys_registry_parser::audit_policy::{Layout, Setting, audit_policy};
 use ys_registry_parser::ntuser::{
     classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
 };
@@ -1835,4 +1836,78 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     );
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
+}
+
+#[test]
+fn audit_policies_of_both_layouts_and_damage() {
+    // Windows Server 2012 R2's layout: 56 subcategories, every one audited for success
+    let counts: [u16; 9] = [5, 10, 14, 3, 4, 6, 6, 4, 4];
+    let total: usize = counts.iter().map(|&c| usize::from(c)).sum();
+    let mut data = Vec::new();
+    for v in [0x100u32, 9, (12 + 2 * (total + 1)) as u32] {
+        data.extend(v.to_le_bytes());
+    }
+    data.extend(std::iter::repeat_n(1u16.to_le_bytes(), total).flatten());
+    data.extend([0xfd, 0x7f]);
+    data.extend(counts.iter().flat_map(|c| c.to_le_bytes()));
+    let mut t = Tree::default();
+    t.set(r"Policy\PolAdtEv", "", 0, &data);
+    let policy = audit_policy(&t.hive("ROOT")).unwrap();
+    assert_eq!(policy.problems, Vec::<String>::new());
+    let events = &policy.events;
+    assert_eq!(
+        (events.layout, events.settings.len(), events.unused),
+        (Some(Layout::Subcategories), 56, Some(0x7ffd))
+    );
+    assert!(
+        events
+            .settings
+            .iter()
+            .all(|s| s.setting == Setting::Success)
+    );
+    // the last of Logon/Logoff before Windows 10 added Group Membership
+    assert_eq!(
+        events.settings[14].subcategory,
+        Some("User / Device Claims")
+    );
+    assert_eq!(policy.key_last_written, WHEN);
+
+    // Windows XP's: auditing off, a setting per category
+    let mut xp = 0u32.to_le_bytes().to_vec();
+    for v in [3u32, 1, 2, 0, 0, 3, 3, 0, 1, 9] {
+        xp.extend(v.to_le_bytes());
+    }
+    let mut t = Tree::default();
+    t.set(r"Policy\PolAdtEv", "", 0, &xp);
+    let policy = audit_policy(&t.hive("ROOT")).unwrap();
+    assert_eq!(
+        (policy.events.layout, policy.events.auditing_mode),
+        (Some(Layout::Categories), Some(false))
+    );
+    let got: Vec<(&str, &str)> = policy
+        .events
+        .settings
+        .iter()
+        .map(|s| (s.category.unwrap(), s.subcategory.unwrap_or("-")))
+        .take(2)
+        .collect();
+    assert_eq!(got, [("System", "-"), ("Logon/Logoff", "-")]);
+    assert_eq!(policy.events.settings[2].setting, Setting::Failure);
+    assert_eq!(policy.data_raw, None);
+
+    // an unknown layout keeps its bytes; no default value; no key
+    let mut t = Tree::default();
+    t.set(r"Policy\PolAdtEv", "", 0, &[1, 2, 3]);
+    let policy = audit_policy(&t.hive("ROOT")).unwrap();
+    assert_eq!(
+        policy.problems,
+        ["an unknown layout of 3 bytes: shorter than the 12-byte header"]
+    );
+    assert_eq!(policy.data_raw.as_deref(), Some(&[1u8, 2, 3][..]));
+    assert!(policy.events.layout.is_none() && policy.events.settings.is_empty());
+    let mut t = Tree::default();
+    t.dword(r"Policy\PolAdtEv", "Other", 1);
+    let policy = audit_policy(&t.hive("ROOT")).unwrap();
+    assert_eq!(policy.problems, ["no default value"]);
+    assert!(audit_policy(&Tree::default().hive("ROOT")).is_none());
 }

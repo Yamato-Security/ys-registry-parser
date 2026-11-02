@@ -52,3 +52,9 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `audit_policy`: the audit policy in force in a `SECURITY` hive's `Policy\PolAdtEv`
+  (`audit_policy`, `AuditPolicy`), decoded by its layout (`audit_events`, `AuditEvents`,
+  `Layout`): a setting per subcategory (Windows Vista and later, in Windows' own order of each
+  category's subcategories) or per category (Windows XP and 2003, with whether auditing is on).
+  Each `AuditSetting` has its category, subcategory, GUID, message ID (`subcategory_id`) and
+  `Setting`. (@YamatoSecurity)
