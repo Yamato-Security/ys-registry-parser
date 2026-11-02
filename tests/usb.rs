@@ -228,3 +228,23 @@ fn usb_identity_serial_fallback_is_unique_and_control_set_scoped() {
     usb.control_set = 2;
     assert!(identity_history(&[storage, usb]).vid_pid.is_none());
 }
+
+#[test]
+fn portable_names_do_not_cross_control_sets_and_retain_their_source() {
+    let (storage, mut usb) = identity_devices();
+    usb.replayed = false;
+    let mut portable = storage.clone();
+    portable.class = DeviceClass::PortableDevice;
+    portable.path = r"ControlSet001\Enum\SWD\WPDBUSENUM\current".into();
+    portable.friendly_name = Some("Current label".into());
+    portable.replayed = true;
+    let mut old = portable.clone();
+    old.control_set = 2;
+    old.path = r"ControlSet002\Enum\SWD\WPDBUSENUM\old".into();
+    old.friendly_name = Some("Historical label".into());
+    let history = identity_history(&[storage, usb, portable.clone(), old.clone()]);
+    assert_eq!(history.volume_names, ["Current label"]);
+    assert!(history.keys.contains(&format!("SYSTEM {}", portable.path)));
+    assert!(!history.keys.contains(&format!("SYSTEM {}", old.path)));
+    assert!(history.replayed_in.contains(&"SYSTEM"));
+}
