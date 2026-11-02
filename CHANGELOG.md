@@ -4,6 +4,15 @@
 
 First version. (@YamatoSecurity)
 
+### Fixed
+- Preserve diagnostics and original bytes for malformed installed-program values, including
+  zero-byte values and WSL's parent default-distribution value; retain replay provenance for
+  that parent value and validate four-component, 16-bit package versions. (@YamatoSecurity)
+- Keep distinct Unicode registry names and MuiCache paths separate when uppercasing would
+  expand one character into several, while retaining ordinary case-insensitive joins. This
+  prevents incorrect key/value lookups and metadata being joined to a different program.
+  (@YamatoSecurity)
+
 ### Added
 - `Hive`: a hive's base block (`Header`), its keys and values; `Hive::walk` (every key, depth
   first, each once, with its path) and `Hive::key` (a key by path, in any case).
@@ -60,3 +69,26 @@ First version. (@YamatoSecurity)
   architecture; `unpack_guid` (a Windows Installer packed product code), `msi_version`,
   `package_name` (a package's full or family name) and `install_date` (`YYYYMMDD`).
   (@YamatoSecurity)
+- `ntuser::mui_cache` (`MuiCache`, `MuiCacheEntry`, `MUI_CACHE`, `MUI_CACHE_XP`): the programs a
+  user ran with the names and companies Windows read from their version resources, from
+  `UsrClass.dat` (Vista and later) and `NTUSER.DAT` (XP), each program's values joined, without
+  `LangID` and the cached resource strings. (@YamatoSecurity)
+- `shellbags`: the `BagMRU` trees of `UsrClass.dat` and `NTUSER.DAT` (`shell_bags`, `ShellBag`,
+  `LOCATIONS`: `Shell` and Windows XP's `ShellNoRoam`, and the 32-bit Explorer's under
+  `Wow6432Node`): every item from the top of each tree down, in `MRUListEx` order, with its
+  parent item, its place in the list, its subkey's `NodeSlot` and last-write time, the
+  last-write time of the key its value is in, and its shell item list's bytes (decode them with
+  a shell item parser). A listed value that isn't there, a value or subkey the list doesn't
+  name, a subkey without its value (the items under it are still read), and subkey lists that
+  loop are reported. (@YamatoSecurity)
+- `system::bam` (`BamEntry`, `Moderator`): when each user last ran each program as the Background
+  and Desktop Activity Moderators recorded it, from `Services\bam` and `Services\dam` in both
+  layouts (`State\UserSettings` and `UserSettings`), and `device_path`, which splits a
+  `\Device\HarddiskVolumeN\…` path into the device and the path on it; `sam::machine_sid`: the
+  computer's SID. (@YamatoSecurity)
+- `usb`: USB history. From `SYSTEM`, USB storage, USB and portable devices (`devices`, `Device`)
+  with their names, IDs, serial numbers and device first install, driver last installed, last
+  arrival and last removal times, and `MountedDevices` (`mounted_devices`, `MountTarget`, `device_ref`); from `SOFTWARE`,
+  `Windows Portable Devices` (`portable_devices`) and ReadyBoost's `EMDMgmt` (`ready_boost`);
+  from `NTUSER.DAT`, `MountPoints2` (`mount_points`); `history` joins them into one record per
+  device and volume, with the users who had it. (@YamatoSecurity)

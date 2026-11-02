@@ -10,8 +10,11 @@ use ys_registry_parser::ntuser::{
     classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
 };
 use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
-use ys_registry_parser::sam::accounts;
+use ys_registry_parser::sam::{accounts, machine_sid};
+use ys_registry_parser::shellbags::shell_bags;
 use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
+use ys_registry_parser::system::{Moderator, bam};
+use ys_registry_parser::usb;
 use ys_registry_parser::{Data, Hive, RecoveredStatus, Source, Status, decode};
 
 /// 2022-02-08T21:03:52Z.
@@ -152,14 +155,19 @@ fn nk(name: &str, parent: u32, subkeys: (u32, u32), values: (u32, u32), flags: u
 }
 
 fn vk(name: &str, kind: u32, len: u32, offset: u32) -> Vec<u8> {
+    let raw_name = if name.is_ascii() {
+        name.as_bytes().to_vec()
+    } else {
+        name.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    };
     let mut vk = vec![0u8; 0x14];
     vk[..2].copy_from_slice(b"vk");
-    vk[2..4].copy_from_slice(&(name.len() as u16).to_le_bytes());
+    vk[2..4].copy_from_slice(&(raw_name.len() as u16).to_le_bytes());
     vk[4..8].copy_from_slice(&len.to_le_bytes());
     vk[8..12].copy_from_slice(&offset.to_le_bytes());
     vk[12..16].copy_from_slice(&kind.to_le_bytes());
-    vk[16..18].copy_from_slice(&1u16.to_le_bytes());
-    vk.extend(name.as_bytes());
+    vk[16..18].copy_from_slice(&u16::from(name.is_ascii()).to_le_bytes());
+    vk.extend(raw_name);
     vk
 }
 
@@ -1838,6 +1846,744 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     assert_eq!(entries[1].run_count, Some(1));
 }
 
+/// BAM's data: the time a program last ran, then 16 bytes Windows writes after it.
+fn bam_data(when: u64) -> Vec<u8> {
+    let mut data = when.to_le_bytes().to_vec();
+    data.extend([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]);
+    data
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn bam_and_dam_keys_in_both_layouts() {
+    let user = "S-1-5-21-1-2-3-1001";
+    let new = format!(r"ControlSet001\Services\bam\State\UserSettings\{user}");
+    let old = r"ControlSet001\Services\bam\UserSettings\S-1-5-18";
+    let dam = format!(r"ControlSet001\Services\dam\State\UserSettings\{user}");
+    let dam_old = format!(r"ControlSet001\Services\dam\UserSettings\{user}");
+    let mut t = Tree::default();
+    t.dword(&new, "Version", 1)
+        .dword(&new, "SequenceNumber", 7)
+        .set(
+            &new,
+            r"\Device\HarddiskVolume3\Windows\explorer.exe",
+            3,
+            &bam_data(WHEN),
+        )
+        .set(
+            &new,
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+            3,
+            &bam_data(WHEN + 1),
+        )
+        // damaged: fewer than 8 bytes, a string; their bytes kept, no time guessed
+        .set(
+            &new,
+            r"\Device\HarddiskVolume3\Tools\short.exe",
+            3,
+            &[1, 2, 3],
+        )
+        .sz(&new, r"\Device\HarddiskVolume3\Tools\text.exe", "12345678")
+        .set(
+            old,
+            r"\Device\HarddiskVolume2\Windows\System32\svchost.exe",
+            3,
+            &bam_data(WHEN + 2),
+        )
+        .set(
+            &dam,
+            r"\Device\HarddiskVolume3\Windows\notepad.exe",
+            3,
+            &bam_data(WHEN + 3),
+        )
+        .dword(&dam_old, "Version", 1)
+        .dword("Select", "Current", 1);
+    let hive = t.hive("ROOT");
+    let (entries, problems) = bam(&hive, 1).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let got: Vec<(Moderator, &str, &str, Option<u64>)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.moderator,
+                e.key_path.as_str(),
+                e.program.as_str(),
+                e.last_run,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                Moderator::Bam,
+                new.as_str(),
+                r"\Device\HarddiskVolume3\Windows\explorer.exe",
+                Some(WHEN)
+            ),
+            (
+                Moderator::Bam,
+                new.as_str(),
+                "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+                Some(WHEN + 1)
+            ),
+            (
+                Moderator::Bam,
+                new.as_str(),
+                r"\Device\HarddiskVolume3\Tools\short.exe",
+                None
+            ),
+            (
+                Moderator::Bam,
+                new.as_str(),
+                r"\Device\HarddiskVolume3\Tools\text.exe",
+                None
+            ),
+            (
+                Moderator::Bam,
+                old,
+                r"\Device\HarddiskVolume2\Windows\System32\svchost.exe",
+                Some(WHEN + 2)
+            ),
+            (
+                Moderator::Dam,
+                dam.as_str(),
+                r"\Device\HarddiskVolume3\Windows\notepad.exe",
+                Some(WHEN + 3)
+            ),
+        ]
+    );
+    assert_eq!(entries[0].user_sid, user);
+    assert_eq!(entries[4].user_sid, "S-1-5-18");
+    assert!(entries[0].key_last_written > 0 && !entries[0].replayed);
+    assert_eq!(
+        (
+            entries[2].problems.as_slice(),
+            entries[2].data_raw.as_deref()
+        ),
+        (
+            &["3 data bytes, fewer than the 8 of a time it last ran".to_owned()][..],
+            Some(&[1u8, 2, 3][..])
+        )
+    );
+    assert_eq!(entries[3].problems, ["is REG_SZ, not REG_BINARY"]);
+    assert_eq!(
+        entries[3].data_raw.as_deref(),
+        Some(&utf16z("12345678")[..])
+    );
+    assert!(entries[0].problems.is_empty() && entries[0].data_raw.is_none());
+    // another control set without these keys; a hive without any
+    assert!(bam(&hive, 2).is_none());
+    assert!(bam(&Tree::default().hive("ROOT"), 1).is_none());
+}
+
+#[test]
+fn machine_sid_from_the_end_of_account_v() {
+    let path = r"SAM\Domains\Account";
+    let sid = |subs: [u32; 4]| {
+        let mut b = vec![1, 4, 0, 0, 0, 0, 0, 5];
+        b.extend(subs.iter().flat_map(|s| s.to_le_bytes()));
+        b
+    };
+    let mut v = vec![0xaa; 40];
+    v.extend(sid([21, 1_760_460_187, 1_592_185_332, 161_725_925]));
+    let mut t = Tree::default();
+    t.set(path, "V", 3, &v);
+    assert_eq!(
+        machine_sid(&t.hive("ROOT")).as_deref(),
+        Some("S-1-5-21-1760460187-1592185332-161725925")
+    );
+    // not a domain SID at the end, too short, no V
+    for bad in [sid([32, 544, 0, 0]), vec![1, 4, 0, 0], Vec::new()] {
+        let mut t = Tree::default();
+        if bad.is_empty() {
+            t.at(path);
+        } else {
+            t.set(path, "V", 3, &bad);
+        }
+        assert_eq!(machine_sid(&t.hive("ROOT")), None);
+    }
+}
+
+/// A device property's FILETIME as Windows 8 and later write it (type `0xffff0010`).
+fn devprop(t: &mut Tree, instance: &str, id: &str, time: u64) {
+    t.set(
+        &format!(r"{instance}\Properties\{{83da6326-97a6-4088-9453-a1923f573b29}}\{id}"),
+        "",
+        0xffff_0010,
+        &time.to_le_bytes(),
+    );
+}
+
+/// `MountedDevices` data: a device path in UTF-16.
+fn device_path(path: &str) -> Vec<u8> {
+    path.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+#[test]
+fn usb_devices_with_their_times() {
+    let stick = r"ControlSet001\Enum\USBSTOR\Disk&Ven_Acme&Prod_Stick&Rev_1.00\SER123&0";
+    let old = r"ControlSet001\Enum\USBSTOR\CdRom&Ven_Old&Prod_Drive&Rev_2\7&1c2d3e4f&0";
+    let bad = r"ControlSet001\Enum\USBSTOR\Disk&Ven_Bad&Prod_Times&Rev_1\BAD1&0";
+    let mut t = Tree::default();
+    t.sz(stick, "FriendlyName", "Acme Stick USB Device")
+        .sz(
+            stick,
+            "ContainerID",
+            "{11111111-2222-3333-4444-555555555555}",
+        )
+        .sz(
+            stick,
+            "Driver",
+            r"{4d36e967-e325-11ce-bfc1-08002be10318}\0007",
+        )
+        .sz(stick, "Service", "disk");
+    for (id, time) in [
+        ("0064", WHEN + 4),
+        ("0065", WHEN + 5),
+        ("0066", WHEN + 6),
+        ("0067", WHEN + 7),
+    ] {
+        devprop(&mut t, stick, id, time);
+    }
+    // Windows 7: Data (and Type) in 000000NN\00000000; only the install times
+    for id in ["00000064", "00000065"] {
+        let at =
+            format!(r"{old}\Properties\{{83da6326-97a6-4088-9453-a1923f573b29}}\{id}\00000000");
+        t.dword(&at, "Type", 0x10)
+            .set(&at, "Data", 3, &WHEN.to_le_bytes());
+    }
+    // damage: 4 bytes, a time past 9999, a property that isn't a time, a FriendlyName not a string
+    t.set(
+        &format!(r"{bad}\Properties\{{83da6326-97a6-4088-9453-a1923f573b29}}\0066"),
+        "",
+        0xffff_0010,
+        &[1, 2, 3, 4],
+    );
+    devprop(&mut t, bad, "0067", u64::MAX);
+    devprop(&mut t, bad, "0002", WHEN);
+    t.dword(bad, "FriendlyName", 7);
+    t.sz(
+        r"ControlSet001\Enum\USB\VID_1234&PID_5678\SER123",
+        "ContainerID",
+        "{11111111-2222-3333-4444-555555555555}",
+    )
+    .sz(r"ControlSet001\Enum\USB\VID_1234&PID_5678&MI_00\6&abc&0&0000", "Service", "HidUsb")
+    .sz(
+        r"ControlSet001\Enum\SWD\WPDBUSENUM\_??_USBSTOR#Disk&Ven_Acme&Prod_Stick&Rev_1.00#SER123&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+        "FriendlyName",
+        "ACME_VOL",
+    );
+    let hive = t.hive("ROOT");
+    let (devices, problems) = usb::devices(&hive, 1).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let lines: Vec<String> = devices
+        .iter()
+        .map(|d| {
+            format!(
+                "{} {:?} {:?}/{:?}/{:?}/{:?} {:?}:{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                d.class.name(),
+                d.reference.as_ref().map(|r| r.enumerator.as_str()),
+                d.kind,
+                d.vendor,
+                d.product,
+                d.revision,
+                d.vid,
+                d.pid,
+                d.serial,
+                d.friendly_name,
+                d.driver_last_installed.map(|t| t - WHEN),
+                d.device_first_install.map(|t| t - WHEN),
+                d.last_arrival.map(|t| t - WHEN),
+                d.last_removal.map(|t| t - WHEN),
+                d.problems,
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            // in the order the keys were written
+            r#"usbstor Some("USBSTOR") Some("Disk")/Some("Acme")/Some("Stick")/Some("1.00") None:None Some("SER123") Some("Acme Stick USB Device") Some(4) Some(5) Some(6) Some(7) []"#,
+            r#"usbstor Some("USBSTOR") Some("CdRom")/Some("Old")/Some("Drive")/Some("2") None:None None None Some(0) Some(0) None None []"#,
+            r#"usbstor Some("USBSTOR") Some("Disk")/Some("Bad")/Some("Times")/Some("1") None:None Some("BAD1") None None None None None ["FriendlyName: is REG_DWORD, not a string", "Properties\\{83da6326-97a6-4088-9453-a1923f573b29}\\0066: type 0xffff0010 of 4 bytes, not a FILETIME (01020304)", "Properties\\{83da6326-97a6-4088-9453-a1923f573b29}\\0067: FILETIME 0xffffffffffffffff is past 9999"]"#,
+            r#"usb Some("USB") None/None/None/None Some("1234"):Some("5678") Some("SER123") None None None None None []"#,
+            r#"usb Some("USB") None/None/None/None Some("1234"):Some("5678") None None None None None None []"#,
+            r#"wpdbusenum Some("USBSTOR") Some("Disk")/Some("Acme")/Some("Stick")/Some("1.00") None:None Some("SER123") Some("ACME_VOL") None None None None []"#,
+        ]
+    );
+    assert_eq!(
+        devices[0].path,
+        r"ControlSet001\Enum\USBSTOR\Disk&Ven_Acme&Prod_Stick&Rev_1.00\SER123&0"
+    );
+    assert!(
+        devices
+            .iter()
+            .all(|d| d.last_written == WHEN && !d.replayed)
+    );
+    // no Enum in that control set
+    assert!(usb::devices(&hive, 2).is_none());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn usb_history_joins_devices_volumes_names_and_users() {
+    let stick = r"ControlSet001\Enum\USBSTOR\Disk&Ven_Acme&Prod_Stick&Rev_1.00\SER123&0";
+    let stick_path = r"_??_USBSTOR#Disk&Ven_Acme&Prod_Stick&Rev_1.00#SER123&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}";
+    let gone_path = r"\??\USBSTOR#Disk&Ven_Gone&Prod_Drive&Rev_9#GONE77&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}";
+    let (vol_a, vol_b, vol_c, vol_d) = (
+        "{aaaaaaaa-0000-0000-0000-000000000001}",
+        "{bbbbbbbb-0000-0000-0000-000000000002}",
+        "{cccccccc-0000-0000-0000-000000000003}",
+        "{dddddddd-0000-0000-0000-000000000004}",
+    );
+    let mut mbr = 0x1234_5678_u32.to_le_bytes().to_vec();
+    mbr.extend(1_048_576_u64.to_le_bytes());
+    let mut gpt = b"DMIO:ID:".to_vec();
+    gpt.extend([7u8; 16]);
+    let mut system = Tree::default();
+    system
+        .sz(
+            stick,
+            "ContainerID",
+            "{11111111-2222-3333-4444-555555555555}",
+        )
+        .sz(
+            r"ControlSet001\Enum\USB\VID_1234&PID_5678\SER123",
+            "ContainerID",
+            "{11111111-2222-3333-4444-555555555555}",
+        )
+        .sz(
+            &format!(r"ControlSet001\Enum\SWD\WPDBUSENUM\{stick_path}"),
+            "FriendlyName",
+            "ACME_VOL",
+        )
+        .set(
+            "MountedDevices",
+            &format!(r"\??\Volume{vol_a}"),
+            3,
+            &device_path(stick_path),
+        )
+        .set(
+            "MountedDevices",
+            r"\DosDevices\E:",
+            3,
+            &device_path(stick_path),
+        )
+        .set("MountedDevices", &format!(r"\??\Volume{vol_b}"), 3, &mbr)
+        .set("MountedDevices", r"\DosDevices\C:", 3, &mbr)
+        .set(
+            "MountedDevices",
+            &format!(r"\??\Volume{vol_c}"),
+            3,
+            &device_path(gone_path),
+        )
+        .set(
+            "MountedDevices",
+            "#{eeeeeeee-0000-0000-0000-000000000005}",
+            3,
+            &mbr,
+        )
+        // a GPT system volume's letter, without a volume GUID value
+        .set("MountedDevices", r"\DosDevices\F:", 3, &gpt);
+    let mut software = Tree::default();
+    let pd = r"Microsoft\Windows Portable Devices\Devices";
+    let emd = r"Microsoft\Windows NT\CurrentVersion\EMDMgmt";
+    software
+        .sz(
+            &format!(r"{pd}\WPDBUSENUMROOT#UMB#2&37C186B&1&STORAGE#VOLUME#_??_USBSTOR#DISK&VEN_ACME&PROD_STICK&REV_1.00#SER123&0#"),
+            "FriendlyName",
+            r"E:\",
+        )
+        .sz(&format!(r"{pd}\USB#VID_0781&PID_7400#0781005B300304C7"), "FriendlyName", "Sansa m240")
+        .dword(
+            &format!(r"{emd}\{stick_path}ACME_VOL_305419896"),
+            "CacheSizeInMB",
+            0,
+        )
+        .dword(
+            &format!(r"{emd}\{}GONE_42", gone_path.replace(r"\??\", "_??_")),
+            "CacheSizeInMB",
+            0,
+        )
+        .dword(&format!(r"{emd}\BW_Q___1893742278"), "CacheSizeInMB", 0);
+    let mp2 = r"Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2";
+    let mut alice = Tree::default();
+    alice
+        .dword(&format!(r"{mp2}\{vol_a}"), "BaseClass", 0)
+        .dword(&format!(r"{mp2}\{vol_d}"), "BaseClass", 0)
+        .sz(
+            &format!(r"{mp2}\##fileserver#share#docs"),
+            "_LabelFromReg",
+            "Docs",
+        );
+    let mut bob = Tree::default();
+    bob.dword(&format!(r"{mp2}\{}", vol_a.to_uppercase()), "BaseClass", 0)
+        .dword(&format!(r"{mp2}\{vol_d}"), "BaseClass", 0);
+
+    let (system, software) = (system.hive("ROOT"), software.hive("ROOT"));
+    let devices = usb::devices(&system, 1).unwrap().0;
+    let mounted = usb::mounted_devices(&system).unwrap().0;
+    let portable = usb::portable_devices(&software).unwrap().0;
+    let boost = usb::ready_boost(&software).unwrap().0;
+    let points = |t: &Tree| usb::mount_points(&t.hive("ROOT")).unwrap().0;
+    let users = vec![
+        ("alice".to_owned(), points(&alice)),
+        ("bob".to_owned(), points(&bob)),
+    ];
+    assert_eq!(
+        users[0]
+            .1
+            .iter()
+            .find(|p| p.server.as_deref() == Some("fileserver"))
+            .and_then(|p| p.share.as_deref().zip(p.label.as_deref())),
+        Some((r"\share\docs", "Docs"))
+    );
+    assert_eq!(boost[2].volume_serial, Some(1_893_742_278));
+    let history = usb::history(&usb::Sources {
+        devices: &devices,
+        mounted: &mounted,
+        portable: &portable,
+        ready_boost: &boost,
+        users: &users,
+    });
+    let lines: Vec<String> = history
+        .iter()
+        .map(|h| {
+            format!(
+                "{} {} {:?} {:?} {} {:?} {:?} {:?} {:?} {:?}",
+                h.device.as_ref().map_or("volume", |d| d.class.name()),
+                h.named
+                    .as_ref()
+                    .map_or(String::new(), |r| format!("{}|{}", r.device, r.instance)),
+                h.vid_pid,
+                h.volume_guid,
+                h.drive_letters.iter().collect::<String>(),
+                h.volume_names,
+                h.volume_serials,
+                h.users.iter().map(|u| u.user.as_str()).collect::<Vec<_>>(),
+                h.found_in,
+                h.problems,
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            // the stick, its USB device's IDs (by container), its volume, letter, names, serial, users
+            r#"usbstor  Some((Some("1234"), Some("5678"))) Some("{aaaaaaaa-0000-0000-0000-000000000001}") E ["ACME_VOL", "E:\\"] [305419896] ["alice", "bob"] ["Enum", "Windows Portable Devices", "EMDMgmt", "MountedDevices", "MountPoints2"] []"#,
+            r#"usb  None None  [] [] [] ["Enum"] []"#,
+            r#"wpdbusenum  None Some("{aaaaaaaa-0000-0000-0000-000000000001}") E ["E:\\", "ACME_VOL"] [305419896] ["alice", "bob"] ["Enum", "Windows Portable Devices", "EMDMgmt", "MountedDevices", "MountPoints2"] []"#,
+            // C:, an internal disk's volume
+            r#"volume  None Some("{bbbbbbbb-0000-0000-0000-000000000002}") C [] [] [] ["MountedDevices"] []"#,
+            // a USB storage device whose Enum key is gone, known by its volume and ReadyBoost
+            r#"volume Disk&Ven_Gone&Prod_Drive&Rev_9|GONE77&0 None Some("{cccccccc-0000-0000-0000-000000000003}")  ["GONE"] [42] [] ["EMDMgmt", "MountedDevices"] []"#,
+            // F:, a drive letter without a volume GUID value
+            r#"volume  None None F [] [] [] ["MountedDevices"] []"#,
+            // a volume only users had
+            r#"volume  None Some("{dddddddd-0000-0000-0000-000000000004}")  [] [] ["alice", "bob"] ["MountPoints2"] []"#,
+            // a phone only SOFTWARE names, and a ReadyBoost device of no USB storage
+            r#"volume VID_0781&PID_7400|0781005B300304C7 None None  ["Sansa m240"] [] [] ["Windows Portable Devices"] []"#,
+            r#"volume  None None  ["BW_Q__"] [1893742278] [] ["EMDMgmt"] []"#,
+        ]
+    );
+    // where each was found
+    assert_eq!(
+        history[0].keys,
+        [
+            format!("SYSTEM {stick}"),
+            r"SYSTEM ControlSet001\Enum\USB\VID_1234&PID_5678\SER123".to_owned(),
+            format!(r"SYSTEM ControlSet001\Enum\SWD\WPDBUSENUM\{stick_path}"),
+            format!(
+                r"SOFTWARE {pd}\WPDBUSENUMROOT#UMB#2&37C186B&1&STORAGE#VOLUME#_??_USBSTOR#DISK&VEN_ACME&PROD_STICK&REV_1.00#SER123&0#"
+            ),
+            format!(r"SOFTWARE {emd}\{stick_path}ACME_VOL_305419896"),
+            format!(r"SYSTEM MountedDevices: \??\Volume{vol_a}"),
+            r"SYSTEM MountedDevices: \DosDevices\E:".to_owned(),
+            format!(r"NTUSER.DAT (alice) {mp2}\{vol_a}"),
+            format!(r"NTUSER.DAT (bob) {mp2}\{}", vol_a.to_uppercase()),
+        ]
+    );
+    assert_eq!(
+        history[6].keys,
+        [
+            format!(r"NTUSER.DAT (alice) {mp2}\{vol_d}"),
+            format!(r"NTUSER.DAT (bob) {mp2}\{vol_d}"),
+        ]
+    );
+}
+
+/// Each `BagMRU` item as `key: place, slot, data, problems`.
+fn bag_lines(hive: &Hive) -> (Vec<String>, Vec<String>) {
+    let (bags, problems) = shell_bags(hive).unwrap();
+    let lines = bags
+        .iter()
+        .map(|b| {
+            format!(
+                "{} parent={:?} mru={:?} slot={:?} data={:?} own_key={} {:?}",
+                b.key_path(),
+                b.parent,
+                b.mru_position,
+                b.node_slot,
+                b.data,
+                b.last_written.is_some(),
+                b.problems
+            )
+        })
+        .collect();
+    (lines, problems)
+}
+
+#[test]
+fn shell_bags_follow_mru_order_down_each_tree() {
+    const BAG: &str = r"Local Settings\Software\Microsoft\Windows\Shell\BagMRU";
+    let mut t = Tree::default();
+    // BagMRU: 1 then 0 then 3 (no such value); 2 isn't listed; 5 is a subkey without a value;
+    // `x` is no item at all.
+    t.set(BAG, "MRUListEx", 3, &mru(&[1, 0, 3]))
+        .set(BAG, "0", 3, &[1, 0])
+        .set(BAG, "1", 3, &[2, 0])
+        .set(BAG, "2", 3, &[3, 0])
+        .set(BAG, "NodeSlots", 3, &[2, 2]);
+    t.dword(&format!(r"{BAG}\0"), "NodeSlot", 4)
+        .set(&format!(r"{BAG}\0"), "MRUListEx", 3, &mru(&[0]))
+        .set(&format!(r"{BAG}\0"), "0", 1, &utf16z("text"));
+    t.sz(&format!(r"{BAG}\1"), "NodeSlot", "seven");
+    t.dword(&format!(r"{BAG}\5"), "NodeSlot", 9);
+    t.at(&format!(r"{BAG}\x"));
+    // Windows XP's tree, in the same hive for the test.
+    t.set(
+        r"Software\Microsoft\Windows\ShellNoRoam\BagMRU",
+        "MRUListEx",
+        3,
+        &mru(&[0]),
+    )
+    .set(
+        r"Software\Microsoft\Windows\ShellNoRoam\BagMRU",
+        "0",
+        3,
+        &[4, 0],
+    );
+    let hive = t.hive("ROOT");
+    let (lines, problems) = bag_lines(&hive);
+    assert_eq!(
+        problems,
+        [format!(r#"{BAG}: subkey "x" is not a numbered item"#)]
+    );
+    assert_eq!(
+        lines,
+        [
+            format!(r#"{BAG}\1 parent=None mru=Some(0) slot=None data=Some([2, 0]) own_key=true ["NodeSlot: is REG_SZ of 12 bytes, not a REG_DWORD"]"#),
+            format!(r"{BAG}\0 parent=None mru=Some(1) slot=Some(4) data=Some([1, 0]) own_key=true []"),
+            format!(r#"{BAG}\0\0 parent=Some(1) mru=Some(0) slot=None data=Some([116, 0, 101, 0, 120, 0, 116, 0, 0, 0]) own_key=false ["is REG_SZ, not REG_BINARY"]"#),
+            format!(r#"{BAG}\3 parent=None mru=Some(2) slot=None data=None own_key=false ["MRUListEx lists value 3, which is not there"]"#),
+            format!(r#"{BAG}\2 parent=None mru=None slot=None data=Some([3, 0]) own_key=false ["MRUListEx doesn't list it"]"#),
+            format!(r#"{BAG}\5 parent=None mru=None slot=Some(9) data=None own_key=true ["no value 5 in its parent key: its shell item is unknown"]"#),
+            r"Software\Microsoft\Windows\ShellNoRoam\BagMRU\0 parent=None mru=Some(0) slot=None data=Some([4, 0]) own_key=false []".to_owned(),
+        ]
+    );
+    let (bags, _) = shell_bags(&hive).unwrap();
+    assert_eq!(bags[2].parent_key_path(), format!(r"{BAG}\0"));
+    assert!(
+        bags.iter()
+            .all(|b| b.parent_last_written == WHEN && !b.replayed)
+    );
+    assert!(shell_bags(&Tree::default().hive("ROOT")).is_none());
+}
+
+#[test]
+fn a_shell_bag_subkey_that_loops_back_is_read_once() {
+    let mut b = Builder::new();
+    // BagMRU\0\0's subkey list holds BagMRU\0: the walk would go round for ever.
+    let item = b.value("0", 3, &[1, 0], false);
+    let list = b.value("MRUListEx", 3, &mru(&[0]), false);
+    let mid_item = b.value("0", 3, &[2, 0], false);
+    let mid_list = b.value("MRUListEx", 3, &mru(&[0]), false);
+    let mid_values = b.list(&[mid_list, mid_item], false);
+    let inner_item = b.value("0", 3, &[3, 0], false);
+    let inner_list = b.value("MRUListEx", 3, &mru(&[0]), false);
+    let inner_values = b.list(&[inner_list, inner_item], false);
+    let inner_subkeys = b.lf(&[0]);
+    let inner = b.put(
+        &nk("0", 0, (1, inner_subkeys), (2, inner_values), 0x20),
+        false,
+    );
+    let zero_subkeys = b.lf(&[inner]);
+    let zero = b.put(&nk("0", 0, (1, zero_subkeys), (2, mid_values), 0x20), false);
+    let bag = b.key("BagMRU", 0, &[zero], &[list, item], false);
+    let entry = inner_subkeys as usize + 8;
+    b.bin[entry..entry + 4].copy_from_slice(&zero.to_le_bytes());
+    let mut parent = bag;
+    for name in ["Shell", "Windows", "Microsoft", "Software"] {
+        parent = b.key(name, 0, &[parent], &[], false);
+    }
+    let root = b.root(&[parent]);
+    let hive = Hive::from_bytes(b.hive(root)).unwrap();
+    let (bags, problems) = shell_bags(&hive).unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    let keys: Vec<String> = bags
+        .iter()
+        .map(ys_registry_parser::shellbags::ShellBag::key_path)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            r"Software\Microsoft\Windows\Shell\BagMRU\0",
+            r"Software\Microsoft\Windows\Shell\BagMRU\0\0",
+            r"Software\Microsoft\Windows\Shell\BagMRU\0\0\0",
+        ]
+    );
+    assert!(bags[..2].iter().all(|b| b.problems.is_empty()));
+    assert_eq!(bags[2].data.as_deref(), Some(&[3, 0][..]));
+    assert_eq!(
+        bags[2].problems,
+        [
+            "its subkey is a key already read (the hive's subkey lists loop): the items under it are not read again"
+        ]
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn mui_cache_in_each_form() {
+    use ys_registry_parser::ntuser::{MUI_CACHE, MUI_CACHE_XP, MuiCacheEntry, mui_cache};
+    let mut lossy = utf16z("Ac");
+    lossy[2..4].copy_from_slice(&0xd800u16.to_le_bytes());
+    let mut t = Tree::default();
+    t.set(MUI_CACHE, "LangID", 3, &[9, 4])
+        // Windows 8 and later: two values per program, joined in any case
+        .sz(MUI_CACHE, r"C:\Tools\a.exe.FriendlyAppName", "A tool")
+        .sz(MUI_CACHE, r"c:\tools\A.EXE.applicationcompany", "Acme")
+        // Windows 7: the path alone; its friendly name is already given, so another entry
+        .sz(MUI_CACHE, r"C:\Tools\a.exe", "A tool, older")
+        .set(
+            MUI_CACHE,
+            r"%ProgramFiles%\x.exe.FriendlyAppName",
+            2,
+            &utf16z("Expanded"),
+        )
+        .sz(MUI_CACHE, "@shell32.dll,-22019", "Calculator")
+        // damaged: not a string; not valid UTF-16
+        .set(
+            MUI_CACHE,
+            r"C:\Tools\bin.exe.FriendlyAppName",
+            3,
+            &[1, 2, 3],
+        )
+        .set(MUI_CACHE, r"C:\Tools\bin.exe.ApplicationCompany", 1, &lossy);
+    let cache = mui_cache(&t.hive("S-1-5-21-1-2-3-1001_Classes")).unwrap();
+    assert_eq!((cache.resource_strings, cache.problems.len()), (1, 0));
+    let entry = |path: &str, name: Option<&str>, company: Option<&str>| MuiCacheEntry {
+        key_path: MUI_CACHE,
+        key_last_written: WHEN,
+        path: path.to_owned(),
+        friendly_app_name: name.map(str::to_owned),
+        application_company: company.map(str::to_owned),
+        ..MuiCacheEntry::default()
+    };
+    let mut bin = entry(r"C:\Tools\bin.exe", None, Some("A\u{fffd}"));
+    bin.friendly_app_name_raw = Some(vec![1, 2, 3]);
+    bin.application_company_raw = Some(lossy.clone());
+    bin.problems = vec![
+        "FriendlyAppName: is REG_BINARY, not a string".to_owned(),
+        "ApplicationCompany: is not valid UTF-16: decoded lossily".to_owned(),
+    ];
+    assert_eq!(
+        cache.entries,
+        [
+            entry(r"C:\Tools\a.exe", Some("A tool"), Some("Acme")),
+            entry(r"C:\Tools\a.exe", Some("A tool, older"), None),
+            entry(r"%ProgramFiles%\x.exe", Some("Expanded"), None),
+            bin,
+        ]
+    );
+
+    // Windows XP: NTUSER.DAT's ShellNoRoam, with resource strings
+    let mut t = Tree::default();
+    t.set(MUI_CACHE_XP, "LangID", 3, &[9, 4])
+        .sz(MUI_CACHE_XP, "@xpsp1res.dll,-11004", "Outlook Express")
+        .sz(
+            MUI_CACHE_XP,
+            r"@C:\WINDOWS\system32\SHELL32.dll,-9216",
+            "My Computer",
+        )
+        .sz(MUI_CACHE_XP, r"C:\WINDOWS\system32\notepad.exe", "Notepad");
+    let cache = mui_cache(&t.hive("ROOT")).unwrap();
+    assert_eq!(cache.resource_strings, 2);
+    assert_eq!(
+        cache.entries,
+        [MuiCacheEntry {
+            key_path: MUI_CACHE_XP,
+            ..entry(r"C:\WINDOWS\system32\notepad.exe", Some("Notepad"), None)
+        }]
+    );
+
+    // an empty key; no key
+    let mut t = Tree::default();
+    t.at(MUI_CACHE);
+    assert_eq!(mui_cache(&t.hive("ROOT")).map(|c| c.entries.len()), Some(0));
+    let mut t = Tree::default();
+    t.dword(r"Software\Microsoft\Windows\ShellNoRoam", "x", 1);
+    assert_eq!(mui_cache(&t.hive("ROOT")), None);
+}
+
+#[test]
+fn mui_cache_does_not_join_distinct_unicode_paths() {
+    use ys_registry_parser::ntuser::{MUI_CACHE, mui_cache};
+    let mut tree = Tree::default();
+    tree.sz(
+        MUI_CACHE,
+        r"C:\Tools\straße.exe.FriendlyAppName",
+        "Street tool",
+    )
+    .sz(
+        MUI_CACHE,
+        r"C:\Tools\STRASSE.EXE.ApplicationCompany",
+        "Another company",
+    )
+    .sz(MUI_CACHE, r"C:\Tools\café.exe.FriendlyAppName", "Cafe tool")
+    .sz(
+        MUI_CACHE,
+        r"c:\tools\CAFÉ.EXE.ApplicationCompany",
+        "Cafe company",
+    );
+    let cache = mui_cache(&tree.hive("ROOT")).unwrap();
+    assert_eq!(cache.entries.len(), 3);
+    assert_eq!(cache.entries[0].path, r"C:\Tools\straße.exe");
+    assert_eq!(
+        cache.entries[0].friendly_app_name.as_deref(),
+        Some("Street tool")
+    );
+    assert_eq!(cache.entries[0].application_company, None);
+    assert_eq!(cache.entries[1].path, r"C:\Tools\STRASSE.EXE");
+    assert_eq!(cache.entries[1].friendly_app_name, None);
+    assert_eq!(
+        cache.entries[1].application_company.as_deref(),
+        Some("Another company")
+    );
+    assert_eq!(
+        cache.entries[2].friendly_app_name.as_deref(),
+        Some("Cafe tool")
+    );
+    assert_eq!(
+        cache.entries[2].application_company.as_deref(),
+        Some("Cafe company")
+    );
+}
+
+#[test]
+fn value_lookup_does_not_expand_unicode_names() {
+    let mut tree = Tree::default();
+    tree.sz("Names", "straße", "first")
+        .sz("Names", "STRASSE", "second")
+        .sz("Names", "café", "third");
+    let hive = tree.hive("ROOT");
+    let names = hive.key("Names").unwrap();
+    assert_eq!(names.value("STRASSE").unwrap().name(), "STRASSE");
+    assert_eq!(names.value("straße").unwrap().name(), "straße");
+    assert_eq!(names.value("CAFÉ").unwrap().name(), "café");
+}
+
 /// Each program as `source scope key | name version | date | location | source`, with what
 /// else is set.
 fn programs(records: &[Program]) -> Vec<String> {
@@ -2104,4 +2850,95 @@ fn installed_software_of_an_ntuser_hive() {
     t.sz(&docker, "DistributionName", "x");
     let (records, _) = installed::ntuser(&t.hive("ROOT"));
     assert_eq!((records.len(), records[0].version.as_deref()), (1, None));
+}
+
+#[test]
+fn installed_malformed_empty_values_keep_diagnostics_and_bytes() {
+    let root = r"Microsoft\Windows\CurrentVersion\Uninstall";
+    let bad = format!(r"{root}\Broken");
+    let clean = format!(r"{root}\Clean");
+    let mut tree = Tree::default();
+    tree.set(&bad, "EstimatedSize", 4, &[])
+        .set(&bad, "WindowsInstaller", 4, &[1, 2])
+        .set(&bad, "SystemComponent", 1, &[0])
+        .set(&bad, "Publisher", 3, &[])
+        .dword(&clean, "EstimatedSize", 0)
+        .sz(&clean, "SystemComponent", "");
+    let (records, problems) = installed::software(&tree.hive("ROOT"));
+    assert_eq!(problems, Vec::<String>::new());
+    let broken = records.iter().find(|r| r.key_path == bad).unwrap();
+    assert_eq!(broken.problems.len(), 4, "{:?}", broken.problems);
+    for field in [
+        "EstimatedSize",
+        "WindowsInstaller",
+        "SystemComponent",
+        "Publisher",
+    ] {
+        assert!(
+            broken
+                .problems
+                .iter()
+                .any(|problem| problem.starts_with(field)),
+            "{field}"
+        );
+        assert!(
+            broken.data_raw.iter().any(|(name, _)| name == field),
+            "{field}"
+        );
+    }
+    assert_eq!(
+        broken
+            .data_raw
+            .iter()
+            .find(|(name, _)| name == "Publisher")
+            .unwrap()
+            .1,
+        Vec::<u8>::new()
+    );
+    let clean = records.iter().find(|r| r.key_path == clean).unwrap();
+    assert_eq!(clean.size_kb, Some(0));
+    assert!(
+        clean.system_component.is_none() && clean.problems.is_empty() && clean.data_raw.is_empty()
+    );
+}
+
+#[test]
+fn installed_package_names_require_four_bounded_version_components() {
+    assert!(installed::package_name("Example.App_0.65535.1.0_x64__8wekyb3d8bbwe").is_some());
+    assert!(installed::package_name("Example.App_8wekyb3d8bbwe").is_some());
+    for version in [
+        "1.2",
+        "1.2.3.4.5",
+        "1..3.4",
+        "...",
+        "65536.0.0.0",
+        "1.2.3.65536",
+    ] {
+        let full = format!("Example.App_{version}_x64__8wekyb3d8bbwe");
+        assert!(installed::package_name(&full).is_none(), "{full}");
+    }
+}
+
+#[test]
+fn installed_wsl_parent_default_damage_is_retained() {
+    let lxss = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
+    let distribution = format!(r"{lxss}\{{17A1BA00-E5D7-44BA-AF5F-194A2677FBB6}}");
+    let mut tree = Tree::default();
+    tree.set(lxss, "DefaultDistribution", 3, &[1, 2, 3])
+        .sz(&distribution, "DistributionName", "Example")
+        .dword(&distribution, "Flags", 0x0f);
+    let (records, problems) = installed::ntuser(&tree.hive("ROOT"));
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(records.len(), 1);
+    assert!(
+        records[0]
+            .problems
+            .iter()
+            .any(|problem| problem.starts_with("DefaultDistribution:"))
+    );
+    assert_eq!(
+        records[0].data_raw,
+        [("DefaultDistribution".to_string(), vec![1, 2, 3])]
+    );
+    assert!(!records[0].details.iter().any(|(name, _)| name == "Default"));
 }

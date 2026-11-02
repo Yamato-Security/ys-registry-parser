@@ -7,12 +7,15 @@ use std::sync::OnceLock;
 use proptest::prelude::*;
 use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
 use ys_registry_parser::ntuser::{
-    classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
+    classes_sid, mui_cache, profile_name, recent_docs, user_assist, user_assist_data,
+    user_assist_settings,
 };
 use ys_registry_parser::persistence::{self, MachineClasses};
-use ys_registry_parser::sam::{accounts, user_f, user_v};
+use ys_registry_parser::sam::{accounts, machine_sid, user_f, user_v};
+use ys_registry_parser::shellbags::shell_bags;
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
-use ys_registry_parser::system::{ControlSets, computer_name, services};
+use ys_registry_parser::system::{ControlSets, bam, computer_name, device_path, services};
+use ys_registry_parser::usb;
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!(
@@ -32,10 +35,22 @@ fn system() -> &'static [u8] {
     SYSTEM.get_or_init(|| fixture("SYSTEM"))
 }
 
+/// The Windows 10 SYSTEM hive with BAM keys, unpacked once.
+fn system_win10() -> &'static [u8] {
+    static SYSTEM: OnceLock<Vec<u8>> = OnceLock::new();
+    SYSTEM.get_or_init(|| fixture("SYSTEM_WIN_10_1709"))
+}
+
 /// The NTUSER.DAT hive, unpacked once.
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// The UsrClass.dat hive (`BagMRU` and `MuiCache`), unpacked once.
+fn usrclass() -> &'static [u8] {
+    static USRCLASS: OnceLock<Vec<u8>> = OnceLock::new();
+    USRCLASS.get_or_init(|| fixture("UsrClass.dat"))
 }
 
 /// regipy's `NTUSER-WSL.DAT`, with WSL distributions and App Paths, unpacked once.
@@ -68,13 +83,38 @@ fn read_all(data: Vec<u8>) {
     let _ = hive.deleted();
     let sets = ControlSets::read(&hive);
     let _ = computer_name(&hive);
+    let mut devices = Vec::new();
     for set in sets.present {
         let _ = services(&hive, set);
         let _ = persistence::system(&hive, set);
+        devices.extend(usb::devices(&hive, set).map(|d| d.0).unwrap_or_default());
+        let _ = bam(&hive, set);
     }
+    // the USB history of a hive that is every one of its hives at once
+    let mounted = usb::mounted_devices(&hive).map(|m| m.0).unwrap_or_default();
+    let portable = usb::portable_devices(&hive)
+        .map(|p| p.0)
+        .unwrap_or_default();
+    let ready_boost = usb::ready_boost(&hive).map(|b| b.0).unwrap_or_default();
+    let users = vec![(
+        "user".to_owned(),
+        usb::mount_points(&hive).map(|p| p.0).unwrap_or_default(),
+    )];
+    let _ = usb::history(&usb::Sources {
+        devices: &devices,
+        mounted: &mounted,
+        portable: &portable,
+        ready_boost: &ready_boost,
+        users: &users,
+    });
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
-    let _ = (user_assist(&hive), user_assist_settings(&hive));
-    let _ = accounts(&hive);
+    let _ = (
+        user_assist(&hive),
+        user_assist_settings(&hive),
+        shell_bags(&hive),
+        mui_cache(&hive),
+    );
+    let _ = (accounts(&hive), machine_sid(&hive));
     let _ = (installed::software(&hive), installed::ntuser(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
@@ -114,6 +154,41 @@ proptest! {
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
     ) {
         read_all(damage(system().to_vec(), flips));
+    }
+
+    /// MuiCache's key and values damaged: read without a panic.
+    #[test]
+    fn a_damaged_mui_cache(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(usrclass().to_vec(), flips), &[])
+        {
+            let _ = mui_cache(&hive);
+        }
+    }
+
+    /// BAM's keys and values damaged: read without a panic.
+    #[test]
+    fn a_damaged_bam(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(system_win10().to_vec(), flips), &[])
+        {
+            for set in ControlSets::read(&hive).present {
+                for entry in bam(&hive, set).map(|b| b.0).unwrap_or_default() {
+                    let _ = device_path(&entry.program);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_damaged_usrclass_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        read_all(damage(usrclass().to_vec(), flips));
     }
 
     /// Installed software's keys and values damaged: read without a panic.
@@ -160,8 +235,12 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (usb::mount_target(&rest), usb::mount_target(&bytes));
         let text = String::from_utf8_lossy(&rest);
         let _ = (unpack_guid(&text), install_date(&text), package_name(&text));
         let _ = msi_version(u32::from_le_bytes([version as u8, 0, 0, rest.len() as u8]));
+        let _ = (usb::device_ref(&text), usb::storage_name(&text), usb::vid_pid(&text));
+        let _ = usb::serial("USBSTOR", &text);
+        let _ = device_path(&String::from_utf8_lossy(&rest));
     }
 }

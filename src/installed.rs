@@ -160,7 +160,8 @@ pub struct Program {
     /// The bytes of values that are not what their names say (a number that isn't a
     /// `REG_DWORD`, text that isn't valid UTF-16), by value name.
     pub data_raw: Vec<(String, Vec<u8>)>,
-    /// Whether the transaction logs' replay wrote its key or one of its values.
+    /// Whether the transaction logs' replay wrote its key or a value the record uses,
+    /// including WSL's parent `DefaultDistribution` value.
     pub replayed: bool,
     /// What couldn't be read.
     pub problems: Vec<String>,
@@ -210,28 +211,33 @@ impl Program {
     fn keep(&mut self, value: &Value, why: &str) {
         self.problems.push(format!("{}: {why}", value.name()));
         let bytes = value.read_data().0;
-        if !bytes.is_empty() {
-            self.data_raw.push((value.name(), bytes));
-        }
+        self.data_raw.push((value.name(), bytes));
     }
 
     /// The text of value `name`; `None` when it is empty or not there.
     fn text(&mut self, values: &[Value], name: &str) -> Option<String> {
         let value = self.find(values, name)?;
         let (text, why) = string(value);
+        let why = why.or_else(|| {
+            (!matches!(
+                value.value_type(),
+                ValueType::Sz | ValueType::ExpandSz | ValueType::MultiSz
+            ))
+            .then(|| format!("is {}, not a string", value.value_type().name()))
+        });
         if let Some(why) = why {
             self.keep(value, &why);
         }
         text.filter(|t| !t.is_empty())
     }
 
-    /// The number of `REG_DWORD` value `name`; `None` when it is empty (no data, or an empty
-    /// string) or not there.
+    /// The number of `REG_DWORD` value `name`; `None` for a clean empty string or a missing
+    /// value. Wrong types, truncated numbers and damaged strings retain diagnostics.
     fn dword(&mut self, values: &[Value], name: &str) -> Option<u32> {
         let value = self.find(values, name)?;
         let empty_text = matches!(value.value_type(), ValueType::Sz | ValueType::ExpandSz)
-            && string(value).0.is_some_and(|t| t.is_empty());
-        if value.size() == 0 || empty_text {
+            && matches!(string(value), (Some(text), None) if text.is_empty());
+        if empty_text {
             return None;
         }
         match number(value) {
@@ -474,10 +480,6 @@ fn wsl(f: &mut Found) {
         return;
     };
     let lxss_values = f.values(&lxss, &at);
-    let default = lxss_values
-        .iter()
-        .find(|v| v.name().eq_ignore_ascii_case("DefaultDistribution"))
-        .and_then(|v| string(v).0);
     for (key, key_path) in f.subkeys(&lxss, &at) {
         let name = key.name();
         if !is_braced_guid(&name) {
@@ -485,6 +487,7 @@ fn wsl(f: &mut Found) {
         }
         let values = f.values(&key, &key_path);
         let mut p = Program::new(ProgramSource::Wsl, Scope::User, &key, key_path);
+        let default = p.text(&lxss_values, "DefaultDistribution");
         p.name = p.text(&values, "DistributionName");
         p.install_location = p.text(&values, "BasePath");
         let flags = p.dword(&values, "Flags");
@@ -597,8 +600,7 @@ pub fn package_name(full: &str) -> Option<PackageName<'_>> {
     match parts[..] {
         [name, version, architecture, resource_id, publisher_id]
             if named(name)
-                && named(version)
-                && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                && valid_package_version(version)
                 && named(architecture)
                 && named(publisher_id) =>
         {
@@ -619,6 +621,18 @@ pub fn package_name(full: &str) -> Option<PackageName<'_>> {
         }),
         _ => None,
     }
+}
+
+/// A package version has four decimal components, each stored in an unsigned 16-bit word.
+fn valid_package_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    (0..4).all(|_| {
+        parts.next().is_some_and(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && part.parse::<u16>().is_ok()
+        })
+    }) && parts.next().is_none()
 }
 
 /// A product code packed as Windows Installer writes it in its keys' names (32 hex digits: the

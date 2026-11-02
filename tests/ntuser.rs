@@ -1,11 +1,11 @@
 //! The `NTUSER.DAT` of regipy's test data (MIT; `tests/fixtures/regipy/`): its recent documents
-//! and profile. The items, their order and their shortcuts' names are those a reader built on
+//! and profile; and its `UsrClass.dat`'s `MuiCache`. The items, their order and their shortcuts' names are those a reader built on
 //! yarp and libfwsi gives for the same hive (and for 8 other public `NTUSER.DAT` hives).
 #![allow(clippy::unwrap_used)]
 
 use std::io::Read;
 
-use ys_registry_parser::ntuser::{profile_name, recent_docs, user_assist};
+use ys_registry_parser::ntuser::{MUI_CACHE, mui_cache, profile_name, recent_docs, user_assist};
 use ys_registry_parser::{Hive, LogFile};
 
 fn ntuser() -> Hive {
@@ -173,4 +173,89 @@ fn user_assist_of_regipy_hives() {
     assert_eq!(problems, Vec::<String>::new());
     assert_eq!(entries.len(), 21);
     assert!(entries.iter().any(|e| e.replayed));
+}
+
+/// `MuiCache` of regipy's dirty Windows 10 `UsrClass.dat`: the same programs, names and companies
+/// as dissect.target's `muicache` and regipy's values give (827 values of 36 public hives agree
+/// the same way). Its logs add 4 programs; only those are said to be replayed.
+#[test]
+fn mui_cache_of_regipy_usrclass() {
+    let plain = Hive::open(fixture("UsrClass.dat"), &[]).unwrap().0;
+    let cache = mui_cache(&plain).unwrap();
+    assert_eq!(
+        (
+            cache.entries.len(),
+            cache.resource_strings,
+            cache.problems.len()
+        ),
+        (15, 0, 0)
+    );
+    let logs: Vec<LogFile> = ["UsrClass.dat.LOG1", "UsrClass.dat.LOG2"]
+        .iter()
+        .map(|&name| LogFile {
+            name: name.to_owned(),
+            data: fixture(name),
+        })
+        .collect();
+    let replayed = Hive::open(fixture("UsrClass.dat"), &logs).unwrap().0;
+    let cache = mui_cache(&replayed).unwrap();
+    assert_eq!(cache.problems, Vec::<String>::new());
+    assert_eq!(cache.entries.len(), 19);
+    assert!(cache.entries.iter().all(|e| e.key_path == MUI_CACHE
+        && e.key_last_written == 131_674_912_241_941_985
+        && e.problems.is_empty()
+        && e.friendly_app_name_raw.is_none()
+        && e.application_company_raw.is_none()));
+    let first = &cache.entries[0];
+    assert_eq!(
+        (
+            first.path.as_str(),
+            first.friendly_app_name.as_deref(),
+            first.application_company.as_deref()
+        ),
+        (
+            r"C:\Windows\Explorer.exe",
+            Some("Windows Explorer"),
+            Some("Microsoft Corporation")
+        )
+    );
+    let added: Vec<(&str, Option<&str>, Option<&str>)> = cache
+        .entries
+        .iter()
+        .filter(|e| e.replayed)
+        .map(|e| {
+            (
+                e.path.as_str(),
+                e.friendly_app_name.as_deref(),
+                e.application_company.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        added,
+        [
+            (
+                r"C:\Users\jcloudy\Downloads\installbackupandsync.exe",
+                Some("Google Update Setup"),
+                Some("Google Inc.")
+            ),
+            (
+                r"C:\Users\jcloudy\Downloads\DropboxInstaller.exe",
+                Some("Dropbox Update Setup"),
+                Some("Dropbox, Inc.")
+            ),
+            (
+                r"C:\Users\jcloudy\Downloads\BoxSyncSetup.exe",
+                Some("Box Sync"),
+                Some("Box Inc.")
+            ),
+            (
+                r"C:\Program Files (x86)\Microsoft Office\Root\Office16\EXCEL.EXE",
+                Some("Excel 2016"),
+                Some("Microsoft Corporation")
+            ),
+        ]
+    );
+    // Windows 7 keeps it in UsrClass.dat: its NTUSER.DAT has none
+    assert_eq!(mui_cache(&ntuser()), None);
 }
