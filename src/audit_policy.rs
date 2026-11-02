@@ -13,7 +13,7 @@
 //! Windows XP and Server 2003 keep one setting per category (`Layout::Categories`), as the
 //! `POLICY_AUDIT_EVENTS_INFO` structure has them, in 44 bytes: whether auditing is on (a one-byte
 //! `BOOLEAN`, then three bytes of padding that Windows doesn't clear: `00 00 07 00` on a public
-//! Windows XP SP2 image), the 9 categories' settings as `u32`s, and their number (9).
+//! Windows XP image (no service pack)), the 9 categories' settings as `u32`s, and their number (9).
 //!
 //! A setting is 0 (no auditing), 1 (success), 2 (failure) or 3 (both).
 
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn the_xp_layout_ignores_the_padding_after_auditing_mode() {
-        // PolAdtEv of a public Windows XP SP2 image: auditing off, no category audited, and
+        // PolAdtEv of a public Windows XP image (no service pack): auditing off, no category audited, and
         // 0x07 in the padding after the BOOLEAN
         let mut data = vec![0u8; 44];
         data[2] = 7;
