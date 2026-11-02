@@ -225,8 +225,8 @@ fn text_of(value: &Value) -> (Option<String>, Option<Vec<u8>>, Option<String>) {
         Data::Text { value, lossy } => (Some(value), lossy),
         Data::MultiText { values, lossy } => (Some(values.join("; ")), lossy),
         Data::Number(n) => (Some(n.to_string()), false),
-        _ if bytes.is_empty() => (None, false),
         Data::Malformed(bad) => return (None, Some(bytes), Some(why.unwrap_or(bad))),
+        _ if bytes.is_empty() => (None, false),
         Data::Bytes | Data::Undecoded => {
             let hex = bytes.iter().fold(String::new(), |mut hex, b| {
                 let _ = write!(hex, "{b:02x}");
@@ -276,7 +276,12 @@ fn sysinternals(f: &mut Found) {
             trace
                 .problems
                 .extend(why.map(|w| format!("EulaAccepted: {w}")));
-            if values.len() == 1 && tool.subkey_count() == 0 {
+            if values.len() == 1
+                && tool.value_count() == 1
+                && tool.subkey_count() == 0
+                && trace.value.as_deref() == Some("1")
+                && trace.problems.is_empty()
+            {
                 trace.first_used = Some(tool.last_written());
             }
         }
@@ -363,7 +368,9 @@ fn seven_zip(f: &mut Found) {
             Err((items, bad)) => (items, Some(bad)),
         };
         let template = AppTrace::of_value(App::SevenZip, item, &key, &path, value);
-        if let Some(problem) = why.or(bad) {
+        let wrong_type = (value.value_type() != ValueType::Binary)
+            .then(|| format!("is {}, not REG_BINARY", value.value_type().name()));
+        if let Some(problem) = why.or(bad).or(wrong_type) {
             // the list as far as it goes, and its bytes once
             let mut trace = template.clone();
             trace.data_raw = Some(bytes);
@@ -581,6 +588,14 @@ fn settings(f: &mut Found, app: App, path: &str, versions: bool) {
                     let problem = why.or_else(|| {
                         lossy.then(|| "is not valid UTF-16: decoded lossily".to_owned())
                     });
+                    if values.is_empty()
+                        && let Some(problem) = &problem
+                    {
+                        let mut trace = AppTrace::of_value(app, item, &key, &key_path, &value);
+                        trace.data_raw = Some(bytes.clone());
+                        trace.problems.push(problem.clone());
+                        f.records.push(trace);
+                    }
                     for (n, text) in (0u32..).zip(values) {
                         let mut trace = AppTrace::of_value(app, item, &key, &key_path, &value);
                         trace.mru_position = Some(n);
