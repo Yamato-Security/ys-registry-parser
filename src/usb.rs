@@ -861,6 +861,10 @@ pub struct History {
     /// Where it was found: `Enum`, `MountedDevices`, `Windows Portable Devices`, `EMDMgmt`,
     /// `MountPoints2`.
     pub found_in: Vec<&'static str>,
+    /// The keys and values it was joined from, each with its hive:
+    /// `SYSTEM ControlSet001\Enum\USBSTOR\…`, `SYSTEM MountedDevices: \??\Volume{…}`,
+    /// `SOFTWARE Microsoft\Windows Portable Devices\Devices\…`, `NTUSER.DAT (<user>) …\MountPoints2\{…}`.
+    pub keys: Vec<String>,
     /// Whether the transaction logs' replay wrote what it was joined from, by hive:
     /// `SYSTEM`, `SOFTWARE`, `NTUSER.DAT`.
     pub replayed_in: Vec<&'static str>,
@@ -871,10 +875,12 @@ pub struct History {
 impl History {
     fn new(device: Option<Device>, named: Option<DeviceRef>) -> Self {
         let mut found_in = Vec::new();
+        let mut keys = Vec::new();
         let mut replayed_in = Vec::new();
         let mut problems = Vec::new();
         if let Some(d) = &device {
             found_in.push("Enum");
+            keys.push(format!("SYSTEM {}", d.path));
             if d.replayed {
                 replayed_in.push("SYSTEM");
             }
@@ -891,14 +897,18 @@ impl History {
             volume_serials: Vec::new(),
             users: Vec::new(),
             found_in,
+            keys,
             replayed_in,
             problems,
         }
     }
 
-    fn found(&mut self, place: &'static str, hive: &'static str, replayed: bool) {
+    fn found(&mut self, place: &'static str, hive: &'static str, key: String, replayed: bool) {
         if !self.found_in.contains(&place) {
             self.found_in.push(place);
+        }
+        if !self.keys.contains(&key) {
+            self.keys.push(key);
         }
         if replayed && !self.replayed_in.contains(&hive) {
             self.replayed_in.push(hive);
@@ -1086,7 +1096,12 @@ fn users_only(sources: &Sources) -> Vec<History> {
 /// Add a portable device's name.
 fn add_portable(record: &mut History, portable: &PortableDevice) {
     add_name(&mut record.volume_names, portable.friendly_name.as_deref());
-    record.found("Windows Portable Devices", "SOFTWARE", portable.replayed);
+    record.found(
+        "Windows Portable Devices",
+        "SOFTWARE",
+        format!(r"SOFTWARE {PORTABLE_DEVICES}\{}", portable.key),
+        portable.replayed,
+    );
     record.problems.extend(portable.problems.iter().cloned());
 }
 
@@ -1136,7 +1151,12 @@ fn add_boost(record: &mut History, boost: &ReadyBoostDevice) {
     {
         record.volume_serials.push(serial);
     }
-    record.found("EMDMgmt", "SOFTWARE", boost.replayed);
+    record.found(
+        "EMDMgmt",
+        "SOFTWARE",
+        format!(r"SOFTWARE {EMD_MGMT}\{}", boost.key),
+        boost.replayed,
+    );
     record.problems.extend(boost.problems.iter().cloned());
 }
 
@@ -1145,7 +1165,12 @@ fn add_volume(record: &mut History, sources: &Sources, i: usize) {
     let volume = &sources.mounted[i];
     record.volume_guid.clone_from(&volume.volume_guid);
     record.mount_target = Some(volume.target.clone());
-    record.found("MountedDevices", "SYSTEM", volume.replayed);
+    record.found(
+        "MountedDevices",
+        "SYSTEM",
+        format!("SYSTEM MountedDevices: {}", volume.name),
+        volume.replayed,
+    );
     record.problems.extend(volume.problems.iter().cloned());
     for letter in sources
         .mounted
@@ -1156,7 +1181,12 @@ fn add_volume(record: &mut History, sources: &Sources, i: usize) {
             && !record.drive_letters.contains(&l)
         {
             record.drive_letters.push(l);
-            record.found("MountedDevices", "SYSTEM", letter.replayed);
+            record.found(
+                "MountedDevices",
+                "SYSTEM",
+                format!("SYSTEM MountedDevices: {}", letter.name),
+                letter.replayed,
+            );
         }
     }
     let Some(guid) = volume.volume_guid.as_deref() else {
@@ -1179,7 +1209,12 @@ fn add_user(record: &mut History, user: &str, point: &MountPoint) {
         user: user.to_owned(),
         last_written: point.last_written,
     });
-    record.found("MountPoints2", "NTUSER.DAT", point.replayed);
+    record.found(
+        "MountPoints2",
+        "NTUSER.DAT",
+        format!(r"NTUSER.DAT ({user}) {MOUNT_POINTS2}\{}", point.name),
+        point.replayed,
+    );
     record
         .problems
         .extend(point.problems.iter().map(|p| format!("{user}: {p}")));

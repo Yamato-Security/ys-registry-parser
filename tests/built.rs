@@ -2114,4 +2114,26 @@ fn usb_history_joins_devices_volumes_names_and_users() {
             r#"volume  None None  ["BW_Q__"] [1893742278] [] ["EMDMgmt"] []"#,
         ]
     );
+    // where each was found
+    assert_eq!(
+        history[0].keys,
+        [
+            format!("SYSTEM {stick}"),
+            format!(
+                r"SOFTWARE {pd}\WPDBUSENUMROOT#UMB#2&37C186B&1&STORAGE#VOLUME#_??_USBSTOR#DISK&VEN_ACME&PROD_STICK&REV_1.00#SER123&0#"
+            ),
+            format!(r"SOFTWARE {emd}\{stick_path}ACME_VOL_305419896"),
+            format!(r"SYSTEM MountedDevices: \??\Volume{vol_a}"),
+            r"SYSTEM MountedDevices: \DosDevices\E:".to_owned(),
+            format!(r"NTUSER.DAT (alice) {mp2}\{vol_a}"),
+            format!(r"NTUSER.DAT (bob) {mp2}\{}", vol_a.to_uppercase()),
+        ]
+    );
+    assert_eq!(
+        history[5].keys,
+        [
+            format!(r"NTUSER.DAT (alice) {mp2}\{vol_d}"),
+            format!(r"NTUSER.DAT (bob) {mp2}\{vol_d}"),
+        ]
+    );
 }
