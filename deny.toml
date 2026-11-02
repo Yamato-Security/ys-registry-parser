@@ -5,6 +5,7 @@ ignore = []
 [licenses]
 version = 2
 allow = [
+    "RPL-1.5", # this crate's own license (LICENSE)
     "MIT",
     "Apache-2.0",
     "BSD-2-Clause",

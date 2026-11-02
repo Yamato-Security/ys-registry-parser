@@ -4,6 +4,11 @@
 
 First version. (@YamatoSecurity)
 
+### Changed
+- License: ys-registry-parser is now copyright Shirofune Security Co., Ltd. and released under the
+  Reciprocal Public License 1.5 (RPL-1.5) instead of Apache-2.0. Every Rust file carries the
+  copyright and the RPL License Notice. (@YamatoSecurity)
+
 ### Fixed
 - Network timestamps reject overflowing offsets, invalid dates and ambiguous/nonexistent DST
   times. Retain malformed network values and diagnose wrong types. (@YamatoSecurity)
