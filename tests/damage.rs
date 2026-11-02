@@ -16,6 +16,7 @@ use ys_registry_parser::ntuser::{
 use ys_registry_parser::ntuser::{
     feature_usage, feature_usage_created, programs_cache, recent_apps, taskband,
 };
+use ys_registry_parser::office::{mru_item, office, trust_record};
 use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::remote_access::{
     connections, host_key_blob, host_key_fingerprint, host_key_name, mount_point_share, mru_list,
@@ -63,6 +64,22 @@ fn system_win10() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// Plaso's Windows 7 NTUSER.DAT, with Office lists and trust records, unpacked once.
+fn plaso_win7() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| {
+        let path = format!(
+            "{}/tests/fixtures/plaso/NTUSER-WIN7.DAT.gz",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut data = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_end(&mut data)
+            .unwrap();
+        data
+    })
 }
 
 /// The DFIR Artifact Museum's Windows 10 user hive, with Sysinternals keys, unpacked once.
@@ -313,6 +330,24 @@ proptest! {
         read_all(damage(ntuser().to_vec(), flips));
     }
 
+    /// Office's keys and values damaged: read without a panic.
+    #[test]
+    fn damaged_office_keys(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(plaso_win7().to_vec(), flips), &[])
+        {
+            let _ = office(&hive);
+        }
+    }
+
+    /// Office MRU items of any text: decoded or refused.
+    #[test]
+    fn office_mru_items(text in "(\\[[FTO]?[0-9A-Fa-fé]{0,20}\\]?){0,4}\\*?.{0,8}") {
+        let _ = mru_item(&text);
+    }
+
     /// The MRU lists' keys and values damaged, with `TypedURLsTime`: read without a panic.
     #[test]
     fn damaged_mru_lists(
@@ -348,6 +383,7 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (trust_record(&rest), mru_item(&String::from_utf8_lossy(&rest)));
         let _ = (sid(&rest), sid(&bytes));
         let _ = TransitionDate::from_bytes(&rest).map(|d| d.describe());
         let _ = utc_offset(i32::from_le_bytes([version as u8, 0, 0, 0]).wrapping_mul(-1_000_003));

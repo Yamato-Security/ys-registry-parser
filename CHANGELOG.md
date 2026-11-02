@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Office retains malformed trusted-location and multi-string bytes, diagnoses invalid timestamps,
+  and leaves unknown trust flags unknown instead of claiming macros are disabled. (@YamatoSecurity)
 - Security settings keep AMSI COM-value damage and replay provenance, reject invalid RDP ports
   and distinguish legacy Defender configuration from effective protection. (@YamatoSecurity)
 - FeatureUsage preserves malformed RecentApps values, diagnoses a missing first ProgramsCache
@@ -153,3 +155,10 @@ First version. (@YamatoSecurity)
   Restricted Admin, NTLM, Remote Desktop, the firewall, SMBv1, PowerShell (execution policy,
   logging, AMSI providers), last access times, System Restore and event log sizes and channels.
   (@YamatoSecurity)
+- `office` (`office`, `OfficeEntry`, `OfficeList`, `mru_item`, `trust_record`, `setting_meaning`,
+  `MACROS_ENABLED`): Microsoft Office in `NTUSER.DAT`: each version's and application's
+  `File MRU` and `Place MRU` (with Microsoft 365 accounts' `User MRU`), each item's path and
+  last-opened time; `Trusted Documents\TrustRecords`, with when each document was trusted and
+  whether its macros were enabled; and the macro settings (`VBAWarnings`,
+  `BlockContentExecutionFromInternet`, `AccessVBOM`) and `Trusted Locations` of the user and by
+  policy. (@YamatoSecurity)

@@ -5603,3 +5603,441 @@ fn security_text_settings_report_empty_values_of_the_wrong_type() {
     assert!(rows[0].problems.iter().any(|p| p.contains("REG_DWORD")));
     assert_eq!(rows[0].data_raw, Some(vec![]));
 }
+
+/// A trust record: trusted at `when`, with `flags`.
+fn trust(when: u64, flags: u32) -> Vec<u8> {
+    let mut b = when.to_le_bytes().to_vec();
+    b.extend([0, 0xd0, 0x88, 0xc3, 0x10, 0, 0, 0, 0x32, 0x82, 0xa2, 0x01]);
+    b.extend(flags.to_le_bytes());
+    b
+}
+
+/// An Office entry's list, version, application, account, policy, value name, place, path,
+/// times, macros and value.
+type OfficeLine<'a> = (
+    &'static str,
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    bool,
+    &'a str,
+    Option<u32>,
+    Option<&'a str>,
+    Option<u64>,
+    Option<u64>,
+    Option<bool>,
+    Option<&'a str>,
+);
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn office_lists_trust_records_and_settings() {
+    use ys_registry_parser::office::office;
+    let word = r"Software\Microsoft\Office\16.0\Word";
+    let account = format!(r"{word}\User MRU\ADAL_0123");
+    let records = format!(r"{word}\Security\Trusted Documents\TrustRecords");
+    let locations = format!(r"{word}\Security\Trusted Locations");
+    let excel_2013 = r"Software\Microsoft\Office\15.0\Excel";
+    let policy = r"Software\Policies\Microsoft\Office\16.0\Excel\Security";
+    let item = |t: &str, path: &str| format!("[F00000000][T{t}][O00000000]*{path}");
+    let mut t = Tree::default();
+    t.sz(
+        &format!(r"{word}\File MRU"),
+        "Item 2",
+        &item("01D8000000000000", r"C:\old.docx"),
+    )
+    .sz(
+        &format!(r"{word}\File MRU"),
+        "Item 1",
+        &item("01D9000000000000", r"\\server\share\invoice.docm"),
+    )
+    .dword(&format!(r"{word}\File MRU"), "Max Display", 25)
+    .sz(
+        &format!(r"{word}\File MRU"),
+        "Item Metadata 1",
+        "<Metadata />",
+    )
+    .sz(
+        &format!(r"{word}\Place MRU"),
+        "Item 1",
+        &item("01D9000000000000", r"\\server\share\"),
+    )
+    .sz(
+        &format!(r"{account}\File MRU"),
+        "Item 1",
+        &item(
+            "01DA000000000000",
+            "https://example.sharepoint.com/report.docx",
+        ),
+    )
+    // trust records: macros enabled, editing only, cut short
+    .set(
+        &records,
+        r"%USERPROFILE%/Downloads/invoice.docm",
+        3,
+        &trust(WHEN, 0x7fff_ffff),
+    )
+    .set(&records, "file:///C:/old.docx", 3, &trust(WHEN - 1, 1))
+    .set(&records, "file:///C:/cut.docx", 3, &[1, 2, 3])
+    .dword(&format!(r"{word}\Security"), "VBAWarnings", 1)
+    .dword(&format!(r"{word}\Security"), "AccessVBOM", 1)
+    .dword(&format!(r"{word}\Security"), "Level", 1)
+    .dword(&locations, "AllowNetworkLocations", 1)
+    .sz(
+        &format!(r"{locations}\Location99"),
+        "Path",
+        r"C:\Users\Public\",
+    )
+    .dword(&format!(r"{locations}\Location99"), "AllowSubFolders", 1)
+    .sz(
+        &format!(r"{locations}\Location99"),
+        "Date",
+        "11/2/2026 10:00 AM",
+    )
+    // Office 2013: an item without its *, an item whose time isn't hexadecimal, two Item 1s
+    .sz(
+        &format!(r"{excel_2013}\File MRU"),
+        "Item 1",
+        r"[F00000000][T01D0]C:\x.xlsx",
+    )
+    .sz(
+        &format!(r"{excel_2013}\File MRU"),
+        "Item 2",
+        r"[F00000000][TZZ]*C:\y.xlsx",
+    )
+    .sz(
+        &format!(r"{excel_2013}\File MRU"),
+        "item 1",
+        &item("01D0000000000000", r"C:\z.xlsx"),
+    )
+    // set by policy; a location without its Path
+    .dword(policy, "VBAWarnings", 4)
+    .dword(policy, "BlockContentExecutionFromInternet", 1)
+    .sz(
+        &format!(r"{policy}\Trusted Locations\Location0"),
+        "Description",
+        "none",
+    )
+    // keys that aren't versions
+    .dword(
+        r"Software\Microsoft\Office\Common\Security",
+        "VBAWarnings",
+        1,
+    );
+    let hive = t.hive("ROOT");
+    let (entries, problems) = office(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let got: Vec<OfficeLine> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.list.name(),
+                e.office_version.as_str(),
+                e.application.as_str(),
+                e.account.as_deref(),
+                e.policy,
+                e.value_name.as_str(),
+                e.mru_position,
+                e.path.as_deref(),
+                e.last_opened,
+                e.trusted_at,
+                e.macros_enabled,
+                e.value.as_deref(),
+            )
+        })
+        .collect();
+    let (w, e) = ("Word", "Excel");
+    let t = |hex: u64| Some(hex);
+    assert_eq!(
+        got,
+        [
+            (
+                "File MRU",
+                "16.0",
+                w,
+                None,
+                false,
+                "Item 1",
+                Some(0),
+                Some(r"\\server\share\invoice.docm"),
+                t(0x01D9_0000_0000_0000),
+                None,
+                None,
+                None
+            ),
+            (
+                "File MRU",
+                "16.0",
+                w,
+                None,
+                false,
+                "Item 2",
+                Some(1),
+                Some(r"C:\old.docx"),
+                t(0x01D8_0000_0000_0000),
+                None,
+                None,
+                None
+            ),
+            (
+                "Place MRU",
+                "16.0",
+                w,
+                None,
+                false,
+                "Item 1",
+                Some(0),
+                Some(r"\\server\share\"),
+                t(0x01D9_0000_0000_0000),
+                None,
+                None,
+                None
+            ),
+            (
+                "File MRU",
+                "16.0",
+                w,
+                Some("ADAL_0123"),
+                false,
+                "Item 1",
+                Some(0),
+                Some("https://example.sharepoint.com/report.docx"),
+                t(0x01DA_0000_0000_0000),
+                None,
+                None,
+                None
+            ),
+            (
+                "TrustRecords",
+                "16.0",
+                w,
+                None,
+                false,
+                "%USERPROFILE%/Downloads/invoice.docm",
+                None,
+                Some("%USERPROFILE%/Downloads/invoice.docm"),
+                None,
+                Some(WHEN),
+                Some(true),
+                None
+            ),
+            (
+                "TrustRecords",
+                "16.0",
+                w,
+                None,
+                false,
+                "file:///C:/old.docx",
+                None,
+                Some("file:///C:/old.docx"),
+                None,
+                Some(WHEN - 1),
+                Some(false),
+                None
+            ),
+            (
+                "TrustRecords",
+                "16.0",
+                w,
+                None,
+                false,
+                "file:///C:/cut.docx",
+                None,
+                Some("file:///C:/cut.docx"),
+                None,
+                None,
+                None,
+                None
+            ),
+            (
+                "Security",
+                "16.0",
+                w,
+                None,
+                false,
+                "VBAWarnings",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("1 (all macros enabled)")
+            ),
+            (
+                "Security",
+                "16.0",
+                w,
+                None,
+                false,
+                "AccessVBOM",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("1 (the VBA project object model trusted)")
+            ),
+            (
+                "Trusted Locations",
+                "16.0",
+                w,
+                None,
+                false,
+                "AllowNetworkLocations",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("1")
+            ),
+            (
+                "Trusted Locations",
+                "16.0",
+                w,
+                None,
+                false,
+                "Location99",
+                None,
+                Some(r"C:\Users\Public\"),
+                None,
+                None,
+                None,
+                Some("AllowSubFolders=1; Date=11/2/2026 10:00 AM")
+            ),
+            (
+                "File MRU",
+                "15.0",
+                e,
+                None,
+                false,
+                "Item 1",
+                Some(0),
+                None,
+                None,
+                None,
+                None,
+                None
+            ),
+            (
+                "File MRU",
+                "15.0",
+                e,
+                None,
+                false,
+                "item 1",
+                Some(0),
+                Some(r"C:\z.xlsx"),
+                t(0x01D0_0000_0000_0000),
+                None,
+                None,
+                None
+            ),
+            (
+                "File MRU",
+                "15.0",
+                e,
+                None,
+                false,
+                "Item 2",
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+                None
+            ),
+            (
+                "Security",
+                "16.0",
+                e,
+                None,
+                true,
+                "VBAWarnings",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("4 (macros disabled without notification)")
+            ),
+            (
+                "Security",
+                "16.0",
+                e,
+                None,
+                true,
+                "BlockContentExecutionFromInternet",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("1 (macros in files from the Internet blocked)")
+            ),
+            (
+                "Trusted Locations",
+                "16.0",
+                e,
+                None,
+                true,
+                "Location0",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("Description=none")
+            ),
+        ]
+    );
+    let problems: Vec<&[String]> = entries.iter().map(|e| e.problems.as_slice()).collect();
+    assert_eq!(problems[6], ["3 bytes, not the 24 of a trust record"]);
+    assert_eq!(entries[6].data_raw.as_deref(), Some(&[1u8, 2, 3][..]));
+    assert_eq!(problems[11], ["no * before the path"]);
+    assert_eq!(problems[12], ["another value is item 1 too"]);
+    assert_eq!(problems[13], ["TZZ is not a hexadecimal FILETIME"]);
+    assert_eq!(problems[16], ["it has no Path"]);
+    assert_eq!(entries[4].trust_flags, Some(0x7fff_ffff));
+    assert!(entries[4].data_raw.is_none() && problems[0].is_empty());
+    assert_eq!(entries[10].key_path, format!(r"{locations}\Location99"));
+    assert_eq!(entries[3].key_path, format!(r"{account}\File MRU"));
+    // no Office keys
+    assert!(office(&Tree::default().hive("ROOT")).is_none());
+}
+
+#[test]
+fn office_trusted_locations_keep_damaged_values() {
+    use ys_registry_parser::office::office;
+    for (name, kind, bytes) in [
+        ("Path", 1, vec![b'A', 0, 0xff]),
+        ("Description", 7, vec![b'A']),
+    ] {
+        let mut t = Tree::default();
+        let location = r"Software\Microsoft\Office\16.0\Word\Security\Trusted Locations\Location0";
+        t.set(location, name, kind, &bytes);
+        let (rows, _) = office(&t.hive("ROOT")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].data_raw.as_ref(), Some(&bytes));
+        assert!(rows[0].problems.iter().any(|p| p.contains(name)));
+    }
+}
+
+#[test]
+fn office_unknown_trust_flags_remain_unknown() {
+    use ys_registry_parser::office::office;
+    let mut bytes = WHEN.to_le_bytes().to_vec();
+    bytes.extend([0u8; 12]);
+    bytes.extend(2u32.to_le_bytes());
+    let mut t = Tree::default();
+    t.set(
+        r"Software\Microsoft\Office\16.0\Word\Security\Trusted Documents\TrustRecords",
+        "C:\\doc.docm",
+        3,
+        &bytes,
+    );
+    let (rows, _) = office(&t.hive("ROOT")).unwrap();
+    assert_eq!(rows[0].trust_flags, Some(2));
+    assert_eq!(rows[0].macros_enabled, None);
+    assert!(rows[0].problems.iter().any(|p| p.contains("flags")));
+}

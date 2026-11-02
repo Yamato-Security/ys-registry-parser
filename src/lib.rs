@@ -35,6 +35,7 @@ pub mod installed;
 mod log;
 pub mod mru;
 pub mod ntuser;
+pub mod office;
 pub mod persistence;
 mod recover;
 pub mod remote_access;

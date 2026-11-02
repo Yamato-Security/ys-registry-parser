@@ -205,6 +205,16 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `StartPage` and `StartPage2`'s `ProgramsCache`, `ProgramsCacheSMP` and `ProgramsCacheTBP`
   (format versions 1, 9, 12 and 19). A count or time of another type, a list item that isn't
   understood and a link that isn't one keep their bytes.
+- Microsoft Office in `NTUSER.DAT` (`office`): `office` gives, for each version (`16.0`, …) and
+  application, the documents and folders it opened last (`File MRU`, `Place MRU`, and each
+  Microsoft 365 account's `User MRU` lists; `mru_item` decodes an item's `[F…][T…][O…]*path`
+  into its flags, last-opened time and path), the documents whose editing or macros the user
+  enabled (`Security\Trusted Documents\TrustRecords`; `trust_record`: the time it was trusted
+  and the flags, `MACROS_ENABLED` when its macros were), the macro settings `VBAWarnings`,
+  `BlockContentExecutionFromInternet` and `AccessVBOM` (`setting_meaning` says what each number
+  means), and `Security\Trusted Locations` (its values, and each location's `Path` and other
+  values), the user's and those set by policy (`Software\Policies\Microsoft\Office`). Data that
+  doesn't decode keeps its bytes.
 - Autostart locations (`persistence`), one `Autostart` per program, DLL or package a value names
   (a list gives one each), with its `Mechanism` (`name`, and `attack_technique`: its MITRE
   ATT&CK technique, where one fits), key, value, data, program and arguments (`command_line`
@@ -410,6 +420,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
   tasks, lists, actions and times as a separate decoder built on yarp, every `Actions` value
   decoded to its last byte.
+- Office on the 7 public `NTUSER.DAT` hives with its lists (regipy's, Plaso's, notatin's and the
+  DFIR Artifact Museum's, Office 2010 to Microsoft 365): the same 326 `File MRU` and `Place MRU`
+  items (Microsoft 365 accounts' too), with the same paths and times, as dissect.target's Office
+  MRU parser (to its 2 µs: it converts times through floating point), the same 137 Office 2010
+  items as Plaso's `officemru`, to the 100 ns, and the same 10 trust records' times and flags as
+  dissect.target's trust record structure; the same 95 trusted locations as regipy reads.
 - Explorer's use of applications on public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
   artemis' and the DFIR Artifact Museum's, Windows XP to 11): the same `ProgramsCache` items
   (152 on 5 hives) as Plaso's `explorer_programscache`; the same `Favorites` paths (35 on 10
@@ -538,3 +554,5 @@ and Plaso's and notatin's, under the Apache License 2.0 (`tests/fixtures/plaso/L
 Application-history tests also use the DFIR Artifact Museum's hives under MIT (`tests/fixtures/museum/LICENSE`).
 
 Security-setting tests cover malformed values, exclusions, logging and control sets.
+
+Office tests cover recent-file timestamps, trust records, macro settings and trusted locations.
