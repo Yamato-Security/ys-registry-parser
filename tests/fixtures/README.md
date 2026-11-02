@@ -6,5 +6,6 @@
 | `regipy/transactions_NTUSER.DAT.gz`, `transactions_ntuser.dat.log1.gz`, `transactions_ntuser.dat.log2.gz` | the same: a dirty `NTUSER.DAT` and its new-format logs | MIT, `regipy/LICENSE` |
 | `regipy/UsrClass.dat.gz`, `UsrClass.dat.LOG1.gz`, `UsrClass.dat.LOG2.gz` | the same: a dirty `UsrClass.dat` and its new-format logs | MIT, `regipy/LICENSE` |
 | `regipy/SYSTEM.gz` | the same: `SYSTEM.xz`, a 32-bit Windows 7 `SYSTEM` hive with two control sets (`Select\Current` 1, `LastKnownGood` 2) | MIT, `regipy/LICENSE` |
+| `regipy/SYSTEM_WIN_10_1709.gz` | the same: `SYSTEM_WIN_10_1709.xz`, a Windows 10 `SYSTEM` hive whose BAM keys are in both layouts (`bam\UserSettings` and `bam\State\UserSettings`) | MIT, `regipy/LICENSE` |
 
 `SECURITY` is dirty too, without logs. The other hives are clean.
