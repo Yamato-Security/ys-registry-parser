@@ -163,6 +163,11 @@ pub fn mru_item(text: &str) -> Result<MruItem<'_>, String> {
         }
         rest = &field[end + 1..];
     }
+    if let Some(time) = item.last_opened
+        && crate::data::filetime(time).is_none()
+    {
+        return Err(format!("last-opened FILETIME 0x{time:016x} is past 9999"));
+    }
     item.path = rest
         .strip_prefix('*')
         .ok_or_else(|| "no * before the path".to_owned())?;
@@ -181,6 +186,11 @@ pub fn trust_record(bytes: &[u8]) -> Result<(Option<u64>, u32), String> {
         ));
     }
     let time = u64_at(bytes, 0).filter(|&t| t != 0);
+    if let Some(time) = time
+        && crate::data::filetime(time).is_none()
+    {
+        return Err(format!("trusted-at FILETIME 0x{time:016x} is past 9999"));
+    }
     Ok((time, u32_at(bytes, 20).unwrap_or(0)))
 }
 
@@ -402,7 +412,14 @@ impl Reader {
                 Ok((time, flags)) => {
                     entry.trusted_at = time;
                     entry.trust_flags = Some(flags);
-                    entry.macros_enabled = Some(flags == MACROS_ENABLED);
+                    entry.macros_enabled = match flags {
+                        MACROS_ENABLED => Some(true),
+                        1 => Some(false),
+                        flags => {
+                            problems.push(format!("trust flags 0x{flags:08x} are not recognized"));
+                            None
+                        }
+                    };
                 }
                 Err(why) => problems.push(why),
             }
@@ -454,13 +471,20 @@ impl Reader {
             let mut others: Vec<(String, String)> = Vec::new();
             for value in &values {
                 entry.replayed |= value.status() == Status::Replayed;
-                let (text, problems) = setting_text(value);
                 let name = value.name();
+                let (text, problems) = if name.eq_ignore_ascii_case("Path") {
+                    text_of(value)
+                } else {
+                    setting_text(value)
+                };
+                if !problems.is_empty() && entry.data_raw.is_none() {
+                    entry.data_raw = Some(value.read_data().0);
+                }
                 entry
                     .problems
                     .extend(problems.into_iter().map(|p| format!("{name}: {p}")));
                 if name.eq_ignore_ascii_case("Path") {
-                    entry.path = text;
+                    entry.path = text.filter(|p| !p.is_empty());
                 } else {
                     others.push((name, text.unwrap_or_default()));
                 }
@@ -549,7 +573,12 @@ fn setting_text(value: &Value) -> (Option<String>, Vec<String>) {
             }
             Some(value)
         }
-        Data::MultiText { values, .. } => Some(values.join("|")),
+        Data::MultiText { values, lossy } => {
+            if lossy {
+                problems.push("its multi-string is not valid UTF-16: decoded lossily".to_owned());
+            }
+            Some(values.join("|"))
+        }
         Data::Malformed(why) => {
             problems.push(why);
             None
@@ -565,6 +594,14 @@ fn setting_text(value: &Value) -> (Option<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn out_of_range_office_times_are_reported() {
+        assert!(mru_item("[TFFFFFFFFFFFFFFFF]*C:\\document.docx").is_err());
+        let mut record = vec![0xff; 8];
+        record.extend([0u8; 16]);
+        assert!(trust_record(&record).is_err());
+    }
 
     #[test]
     fn mru_items() {
