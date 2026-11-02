@@ -52,3 +52,9 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `usb`: USB history. From `SYSTEM`, USB storage, USB and portable devices (`devices`, `Device`)
+  with their names, IDs, serial numbers and install, first install, last arrival and last removal
+  times, and `MountedDevices` (`mounted_devices`, `MountTarget`, `device_ref`); from `SOFTWARE`,
+  `Windows Portable Devices` (`portable_devices`) and ReadyBoost's `EMDMgmt` (`ready_boost`);
+  from `NTUSER.DAT`, `MountPoints2` (`mount_points`); `history` joins them into one record per
+  device and volume, with the users who had it. (@YamatoSecurity)

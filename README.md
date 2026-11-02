@@ -121,6 +121,23 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
     `SOFTWARE`), each says whether it overrides the machine's registration of the same class or
     command.
 
+- USB history (`usb`): from `SYSTEM`, a control set's USB storage devices (`Enum\USBSTOR`), USB
+  devices (`Enum\USB`) and portable devices (`Enum\SWD\WPDBUSENUM`) (`devices`, `Device`): each
+  with its type, vendor, product and revision, or vendor and product IDs (`storage_name`,
+  `vid_pid`), its serial number (`serial`: without the logical unit, and none when Windows made
+  the instance up), `FriendlyName`, `ContainerID`, driver, and the times its device properties
+  keep (`{83da6326-97a6-4088-9453-a1923f573b29}`, in the Windows 8+ and the Windows 7 layout):
+  install (`0064`), first install (`0065`), last arrival (`0066`) and last removal (`0067`);
+  `MountedDevices` (`mounted_devices`: each drive letter's and volume GUID's MBR disk signature
+  and offset, GPT partition, or device path, and the device a path names, `device_ref`); from
+  `SOFTWARE`, `Windows Portable Devices` (`portable_devices`: the name Explorer gave a device or
+  volume) and ReadyBoost's `EMDMgmt` (`ready_boost`: a volume's label and serial number); from
+  `NTUSER.DAT`, `MountPoints2` (`mount_points`: the volumes and shares a user had mounted, with
+  `_LabelFromReg`). `history` joins them: one record per device and volume of its (letters,
+  names, serial numbers, the users who had it), then the volumes no device key names (an internal
+  disk's, or a removed device's whose `Enum` key is gone), and the devices only `SOFTWARE` names.
+  A property that isn't a FILETIME keeps its bytes in a problem.
+
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
 that leads back to a key already read is read once; a base block whose root is not a key gives way
@@ -216,6 +233,16 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `ntuser_persistence`, and the same (none) `AppInit_DLLs` and IFEO debuggers as its
   `appinitdlls` and `image_file_execution_options`; on regipy's `SYSTEM`, the same LSA packages
   as its `lsa_packages`.
+- USB history on 14 public `SYSTEM` hives (regipy's, Plaso's, dissect's, notatin's and the DFIR
+  Artifact Museum's, Windows 7 to 11 and Server 2012 R2 and 2022): the same USB storage devices
+  (16), USB devices (139) and `MountedDevices` values (138) as regipy's `usbstor_plugin`,
+  `usb_devices` and `mounted_devices` (times to the microsecond regipy rounds to), but for
+  regipy's Windows 7 hive, whose property times regipy doesn't read: there they are the ones
+  Plaso's `windows_usbstor_devices` reads, as are the last-write times of 64 USB device keys
+  (Plaso's `windows_usb_devices`). `MountPoints2` on 19 public `NTUSER.DAT` hives (118 keys): the
+  same keys, servers, shares, labels and times as Plaso's `explorer_mountpoints2`. On the DFIR
+  Artifact Museum's Windows 8.1 hives, `history` gives its 9 USB storage devices the same volume
+  GUIDs, drive letters and users as dissect.target's `usb` plugin.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys

@@ -11,6 +11,7 @@ use ys_registry_parser::ntuser::{
 use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
 use ys_registry_parser::sam::accounts;
 use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
+use ys_registry_parser::usb;
 use ys_registry_parser::{Data, Hive, RecoveredStatus, Source, Status, decode};
 
 /// 2022-02-08T21:03:52Z.
@@ -1835,4 +1836,282 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     );
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
+}
+
+/// A device property's FILETIME as Windows 8 and later write it (type `0xffff0010`).
+fn devprop(t: &mut Tree, instance: &str, id: &str, time: u64) {
+    t.set(
+        &format!(r"{instance}\Properties\{{83da6326-97a6-4088-9453-a1923f573b29}}\{id}"),
+        "",
+        0xffff_0010,
+        &time.to_le_bytes(),
+    );
+}
+
+/// `MountedDevices` data: a device path in UTF-16.
+fn device_path(path: &str) -> Vec<u8> {
+    path.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+#[test]
+fn usb_devices_with_their_times() {
+    let stick = r"ControlSet001\Enum\USBSTOR\Disk&Ven_Acme&Prod_Stick&Rev_1.00\SER123&0";
+    let old = r"ControlSet001\Enum\USBSTOR\CdRom&Ven_Old&Prod_Drive&Rev_2\7&1c2d3e4f&0";
+    let bad = r"ControlSet001\Enum\USBSTOR\Disk&Ven_Bad&Prod_Times&Rev_1\BAD1&0";
+    let mut t = Tree::default();
+    t.sz(stick, "FriendlyName", "Acme Stick USB Device")
+        .sz(
+            stick,
+            "ContainerID",
+            "{11111111-2222-3333-4444-555555555555}",
+        )
+        .sz(
+            stick,
+            "Driver",
+            r"{4d36e967-e325-11ce-bfc1-08002be10318}\0007",
+        )
+        .sz(stick, "Service", "disk");
+    for (id, time) in [
+        ("0064", WHEN + 4),
+        ("0065", WHEN + 5),
+        ("0066", WHEN + 6),
+        ("0067", WHEN + 7),
+    ] {
+        devprop(&mut t, stick, id, time);
+    }
+    // Windows 7: Data (and Type) in 000000NN\00000000; only install times
+    for id in ["00000064", "00000065"] {
+        let at =
+            format!(r"{old}\Properties\{{83da6326-97a6-4088-9453-a1923f573b29}}\{id}\00000000");
+        t.dword(&at, "Type", 0x10)
+            .set(&at, "Data", 3, &WHEN.to_le_bytes());
+    }
+    // damage: 4 bytes, a time past 9999, a property that isn't a time, a FriendlyName not a string
+    t.set(
+        &format!(r"{bad}\Properties\{{83da6326-97a6-4088-9453-a1923f573b29}}\0066"),
+        "",
+        0xffff_0010,
+        &[1, 2, 3, 4],
+    );
+    devprop(&mut t, bad, "0067", u64::MAX);
+    devprop(&mut t, bad, "0002", WHEN);
+    t.dword(bad, "FriendlyName", 7);
+    t.sz(
+        r"ControlSet001\Enum\USB\VID_1234&PID_5678\SER123",
+        "ContainerID",
+        "{11111111-2222-3333-4444-555555555555}",
+    )
+    .sz(r"ControlSet001\Enum\USB\VID_1234&PID_5678&MI_00\6&abc&0&0000", "Service", "HidUsb")
+    .sz(
+        r"ControlSet001\Enum\SWD\WPDBUSENUM\_??_USBSTOR#Disk&Ven_Acme&Prod_Stick&Rev_1.00#SER123&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+        "FriendlyName",
+        "ACME_VOL",
+    );
+    let hive = t.hive("ROOT");
+    let (devices, problems) = usb::devices(&hive, 1).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let lines: Vec<String> = devices
+        .iter()
+        .map(|d| {
+            format!(
+                "{} {:?} {:?}/{:?}/{:?}/{:?} {:?}:{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                d.class.name(),
+                d.reference.as_ref().map(|r| r.enumerator.as_str()),
+                d.kind,
+                d.vendor,
+                d.product,
+                d.revision,
+                d.vid,
+                d.pid,
+                d.serial,
+                d.friendly_name,
+                d.install.map(|t| t - WHEN),
+                d.first_install.map(|t| t - WHEN),
+                d.last_arrival.map(|t| t - WHEN),
+                d.last_removal.map(|t| t - WHEN),
+                d.problems,
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            // in the order the keys were written
+            r#"usbstor Some("USBSTOR") Some("Disk")/Some("Acme")/Some("Stick")/Some("1.00") None:None Some("SER123") Some("Acme Stick USB Device") Some(4) Some(5) Some(6) Some(7) []"#,
+            r#"usbstor Some("USBSTOR") Some("CdRom")/Some("Old")/Some("Drive")/Some("2") None:None None None Some(0) Some(0) None None []"#,
+            r#"usbstor Some("USBSTOR") Some("Disk")/Some("Bad")/Some("Times")/Some("1") None:None Some("BAD1") None None None None None ["FriendlyName: is REG_DWORD, not a string", "Properties\\{83da6326-97a6-4088-9453-a1923f573b29}\\0066: type 0xffff0010 of 4 bytes, not a FILETIME (01020304)", "Properties\\{83da6326-97a6-4088-9453-a1923f573b29}\\0067: FILETIME 0xffffffffffffffff is past 9999"]"#,
+            r#"usb Some("USB") None/None/None/None Some("1234"):Some("5678") Some("SER123") None None None None None []"#,
+            r#"usb Some("USB") None/None/None/None Some("1234"):Some("5678") None None None None None None []"#,
+            r#"wpdbusenum Some("USBSTOR") Some("Disk")/Some("Acme")/Some("Stick")/Some("1.00") None:None Some("SER123") Some("ACME_VOL") None None None None []"#,
+        ]
+    );
+    assert_eq!(
+        devices[0].path,
+        r"ControlSet001\Enum\USBSTOR\Disk&Ven_Acme&Prod_Stick&Rev_1.00\SER123&0"
+    );
+    assert!(
+        devices
+            .iter()
+            .all(|d| d.last_written == WHEN && !d.replayed)
+    );
+    // no Enum in that control set
+    assert!(usb::devices(&hive, 2).is_none());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn usb_history_joins_devices_volumes_names_and_users() {
+    let stick = r"ControlSet001\Enum\USBSTOR\Disk&Ven_Acme&Prod_Stick&Rev_1.00\SER123&0";
+    let stick_path = r"_??_USBSTOR#Disk&Ven_Acme&Prod_Stick&Rev_1.00#SER123&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}";
+    let gone_path = r"\??\USBSTOR#Disk&Ven_Gone&Prod_Drive&Rev_9#GONE77&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}";
+    let (vol_a, vol_b, vol_c, vol_d) = (
+        "{aaaaaaaa-0000-0000-0000-000000000001}",
+        "{bbbbbbbb-0000-0000-0000-000000000002}",
+        "{cccccccc-0000-0000-0000-000000000003}",
+        "{dddddddd-0000-0000-0000-000000000004}",
+    );
+    let mut mbr = 0x1234_5678_u32.to_le_bytes().to_vec();
+    mbr.extend(1_048_576_u64.to_le_bytes());
+    let mut system = Tree::default();
+    system
+        .sz(
+            stick,
+            "ContainerID",
+            "{11111111-2222-3333-4444-555555555555}",
+        )
+        .sz(
+            r"ControlSet001\Enum\USB\VID_1234&PID_5678\SER123",
+            "ContainerID",
+            "{11111111-2222-3333-4444-555555555555}",
+        )
+        .sz(
+            &format!(r"ControlSet001\Enum\SWD\WPDBUSENUM\{stick_path}"),
+            "FriendlyName",
+            "ACME_VOL",
+        )
+        .set(
+            "MountedDevices",
+            &format!(r"\??\Volume{vol_a}"),
+            3,
+            &device_path(stick_path),
+        )
+        .set(
+            "MountedDevices",
+            r"\DosDevices\E:",
+            3,
+            &device_path(stick_path),
+        )
+        .set("MountedDevices", &format!(r"\??\Volume{vol_b}"), 3, &mbr)
+        .set("MountedDevices", r"\DosDevices\C:", 3, &mbr)
+        .set(
+            "MountedDevices",
+            &format!(r"\??\Volume{vol_c}"),
+            3,
+            &device_path(gone_path),
+        )
+        .set(
+            "MountedDevices",
+            "#{eeeeeeee-0000-0000-0000-000000000005}",
+            3,
+            &mbr,
+        );
+    let mut software = Tree::default();
+    let pd = r"Microsoft\Windows Portable Devices\Devices";
+    let emd = r"Microsoft\Windows NT\CurrentVersion\EMDMgmt";
+    software
+        .sz(
+            &format!(r"{pd}\WPDBUSENUMROOT#UMB#2&37C186B&1&STORAGE#VOLUME#_??_USBSTOR#DISK&VEN_ACME&PROD_STICK&REV_1.00#SER123&0#"),
+            "FriendlyName",
+            r"E:\",
+        )
+        .sz(&format!(r"{pd}\USB#VID_0781&PID_7400#0781005B300304C7"), "FriendlyName", "Sansa m240")
+        .dword(
+            &format!(r"{emd}\{stick_path}ACME_VOL_305419896"),
+            "CacheSizeInMB",
+            0,
+        )
+        .dword(
+            &format!(r"{emd}\{}GONE_42", gone_path.replace(r"\??\", "_??_")),
+            "CacheSizeInMB",
+            0,
+        )
+        .dword(&format!(r"{emd}\BW_Q___1893742278"), "CacheSizeInMB", 0);
+    let mp2 = r"Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2";
+    let mut alice = Tree::default();
+    alice
+        .dword(&format!(r"{mp2}\{vol_a}"), "BaseClass", 0)
+        .dword(&format!(r"{mp2}\{vol_d}"), "BaseClass", 0)
+        .sz(
+            &format!(r"{mp2}\##fileserver#share#docs"),
+            "_LabelFromReg",
+            "Docs",
+        );
+    let mut bob = Tree::default();
+    bob.dword(&format!(r"{mp2}\{}", vol_a.to_uppercase()), "BaseClass", 0)
+        .dword(&format!(r"{mp2}\{vol_d}"), "BaseClass", 0);
+
+    let (system, software) = (system.hive("ROOT"), software.hive("ROOT"));
+    let devices = usb::devices(&system, 1).unwrap().0;
+    let mounted = usb::mounted_devices(&system).unwrap().0;
+    let portable = usb::portable_devices(&software).unwrap().0;
+    let boost = usb::ready_boost(&software).unwrap().0;
+    let points = |t: &Tree| usb::mount_points(&t.hive("ROOT")).unwrap().0;
+    let users = vec![
+        ("alice".to_owned(), points(&alice)),
+        ("bob".to_owned(), points(&bob)),
+    ];
+    assert_eq!(
+        users[0]
+            .1
+            .iter()
+            .find(|p| p.server.as_deref() == Some("fileserver"))
+            .and_then(|p| p.share.as_deref().zip(p.label.as_deref())),
+        Some((r"\share\docs", "Docs"))
+    );
+    assert_eq!(boost[2].volume_serial, Some(1_893_742_278));
+    let history = usb::history(&usb::Sources {
+        devices: &devices,
+        mounted: &mounted,
+        portable: &portable,
+        ready_boost: &boost,
+        users: &users,
+    });
+    let lines: Vec<String> = history
+        .iter()
+        .map(|h| {
+            format!(
+                "{} {} {:?} {:?} {} {:?} {:?} {:?} {:?} {:?}",
+                h.device.as_ref().map_or("volume", |d| d.class.name()),
+                h.named
+                    .as_ref()
+                    .map_or(String::new(), |r| format!("{}|{}", r.device, r.instance)),
+                h.vid_pid,
+                h.volume_guid,
+                h.drive_letters.iter().collect::<String>(),
+                h.volume_names,
+                h.volume_serials,
+                h.users.iter().map(|u| u.user.as_str()).collect::<Vec<_>>(),
+                h.found_in,
+                h.problems,
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            // the stick, its USB device's IDs (by container), its volume, letter, names, serial, users
+            r#"usbstor  Some((Some("1234"), Some("5678"))) Some("{aaaaaaaa-0000-0000-0000-000000000001}") E ["ACME_VOL", "E:\\"] [305419896] ["alice", "bob"] ["Enum", "Windows Portable Devices", "EMDMgmt", "MountedDevices", "MountPoints2"] []"#,
+            r#"usb  None None  [] [] [] ["Enum"] []"#,
+            r#"wpdbusenum  None Some("{aaaaaaaa-0000-0000-0000-000000000001}") E ["E:\\", "ACME_VOL"] [305419896] ["alice", "bob"] ["Enum", "Windows Portable Devices", "EMDMgmt", "MountedDevices", "MountPoints2"] []"#,
+            // C:, an internal disk's volume
+            r#"volume  None Some("{bbbbbbbb-0000-0000-0000-000000000002}") C [] [] [] ["MountedDevices"] []"#,
+            // a USB storage device whose Enum key is gone, known by its volume and ReadyBoost
+            r#"volume Disk&Ven_Gone&Prod_Drive&Rev_9|GONE77&0 None Some("{cccccccc-0000-0000-0000-000000000003}")  ["GONE"] [42] [] ["EMDMgmt", "MountedDevices"] []"#,
+            // a volume only users had
+            r#"volume  None Some("{dddddddd-0000-0000-0000-000000000004}")  [] [] ["alice", "bob"] ["MountPoints2"] []"#,
+            // a phone only SOFTWARE names, and a ReadyBoost device of no USB storage
+            r#"volume VID_0781&PID_7400|0781005B300304C7 None None  ["Sansa m240"] [] [] ["Windows Portable Devices"] []"#,
+            r#"volume  None None  ["BW_Q__"] [1893742278] [] ["EMDMgmt"] []"#,
+        ]
+    );
 }

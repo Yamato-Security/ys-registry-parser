@@ -12,6 +12,7 @@ use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, computer_name, services};
+use ys_registry_parser::usb;
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!(
@@ -61,10 +62,29 @@ fn read_all(data: Vec<u8>) {
     let _ = hive.deleted();
     let sets = ControlSets::read(&hive);
     let _ = computer_name(&hive);
+    let mut devices = Vec::new();
     for set in sets.present {
         let _ = services(&hive, set);
         let _ = persistence::system(&hive, set);
+        devices.extend(usb::devices(&hive, set).map(|d| d.0).unwrap_or_default());
     }
+    // the USB history of a hive that is every one of its hives at once
+    let mounted = usb::mounted_devices(&hive).map(|m| m.0).unwrap_or_default();
+    let portable = usb::portable_devices(&hive)
+        .map(|p| p.0)
+        .unwrap_or_default();
+    let ready_boost = usb::ready_boost(&hive).map(|b| b.0).unwrap_or_default();
+    let users = vec![(
+        "user".to_owned(),
+        usb::mount_points(&hive).map(|p| p.0).unwrap_or_default(),
+    )];
+    let _ = usb::history(&usb::Sources {
+        devices: &devices,
+        mounted: &mounted,
+        portable: &portable,
+        ready_boost: &ready_boost,
+        users: &users,
+    });
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
@@ -138,5 +158,9 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (usb::mount_target(&rest), usb::mount_target(&bytes));
+        let text = String::from_utf8_lossy(&rest);
+        let _ = (usb::device_ref(&text), usb::storage_name(&text), usb::vid_pid(&text));
+        let _ = usb::serial("USBSTOR", &text);
     }
 }
