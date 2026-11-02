@@ -204,6 +204,28 @@ pub struct Account {
     pub problems: Vec<String>,
 }
 
+/// The key whose `V` ends with the computer's SID.
+const ACCOUNT_DOMAIN: &str = r"SAM\Domains\Account";
+
+/// The computer's SID, `S-1-5-21-…`: its local accounts' SIDs are it and their RIDs. The last
+/// 24 bytes of `SAM\Domains\Account`'s `V` hold it. `None` when the key or value isn't there, or
+/// those bytes aren't a SID of that form.
+#[must_use]
+pub fn machine_sid(hive: &Hive) -> Option<String> {
+    let bytes = hive.key(ACCOUNT_DOMAIN)?.value("V")?.data().ok()?;
+    let sid = bytes.get(bytes.len().checked_sub(24)?..)?;
+    // revision 1, 4 sub-authorities, NT authority (5), then 21 and the computer's 3 numbers
+    if sid[..8] != [1, 4, 0, 0, 0, 0, 0, 5] || u32_at(sid, 8)? != 21 {
+        return None;
+    }
+    Some(format!(
+        "S-1-5-21-{}-{}-{}",
+        u32_at(sid, 12)?,
+        u32_at(sid, 16)?,
+        u32_at(sid, 20)?
+    ))
+}
+
 /// The name, RID, key time and replay status of an entry under `Users\Names`.
 type NameEntry = (String, Option<u32>, u64, bool);
 

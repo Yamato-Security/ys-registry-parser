@@ -24,18 +24,30 @@
 //! (<https://github.com/msuhanov/regf>, CC BY 4.0). Damage is reported, never a panic: see
 //! [`Key::subkeys`], [`Key::values`] and [`Value::read_data`].
 
+pub mod app_history;
 pub mod audit_policy;
 mod bytes;
+pub mod comdlg32;
 mod data;
 mod deleted;
+mod digest;
 mod hive;
+pub mod installed;
 mod log;
+pub mod mru;
 pub mod ntuser;
+pub mod office;
 pub mod persistence;
 mod recover;
+pub mod remote_access;
 pub mod sam;
+pub mod security_settings;
+mod shell;
+pub mod shellbags;
 pub mod software;
 pub mod system;
+pub mod system_info;
+pub mod usb;
 
 use std::path::Path;
 

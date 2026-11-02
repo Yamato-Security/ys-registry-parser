@@ -320,13 +320,13 @@ impl Setting {
         }
     }
 
-    /// Whether successes are logged.
+    /// Whether the raw success bit is set. Interpret `Other` values as unknown.
     #[must_use]
     pub fn success(self) -> bool {
         self.value() & 1 != 0
     }
 
-    /// Whether failures are logged.
+    /// Whether the raw failure bit is set. Interpret `Other` values as unknown.
     #[must_use]
     pub fn failure(self) -> bool {
         self.value() & 2 != 0
@@ -390,7 +390,7 @@ pub struct AuditEvents {
 #[must_use]
 pub fn audit_events(bytes: &[u8]) -> AuditEvents {
     // Only the first byte is the BOOLEAN; the padding after it is left as it was.
-    if bytes.len() == CATEGORY_LAYOUT && u32_at(bytes, 40) == Some(9) && bytes[0] <= 1 {
+    if bytes.len() == CATEGORY_LAYOUT && u32_at(bytes, 40) == Some(9) {
         return categories(bytes);
     }
     subcategories(bytes)
@@ -400,7 +400,7 @@ pub fn audit_events(bytes: &[u8]) -> AuditEvents {
 fn categories(bytes: &[u8]) -> AuditEvents {
     let mut found = AuditEvents {
         layout: Some(Layout::Categories),
-        auditing_mode: bytes.first().map(|m| *m == 1),
+        auditing_mode: bytes.first().map(|m| *m != 0),
         ..AuditEvents::default()
     };
     for (i, category) in CATEGORIES.iter().enumerate() {
@@ -446,16 +446,20 @@ fn subcategories(bytes: &[u8]) -> AuditEvents {
             bytes.len()
         ));
     }
+    if revision != 0x100 {
+        return unknown(format!("unsupported revision 0x{revision:x}"));
+    }
     found.layout = Some(Layout::Subcategories);
     found.revision = Some(revision);
     let counts: Vec<usize> = (0..count as usize)
         .map(|c| usize::from(u16_at(bytes, offset + 2 * c).unwrap_or(0)))
         .collect();
     let room = (offset - HEADER) / 2;
+    let available = room.saturating_sub(1); // reserve Windows' unused word
     let total: usize = counts.iter().sum();
-    if total > room {
+    if total > available {
         found.problems.push(format!(
-            "the categories count {total} subcategories, the data holds {room} settings"
+            "the categories count {total} subcategories, the data holds {available} settings"
         ));
     }
     let mut at = 0;
@@ -467,7 +471,7 @@ fn subcategories(bytes: &[u8]) -> AuditEvents {
                 .push(format!("category {c} is not one Windows has"));
         }
         for i in 0..n {
-            if at >= room {
+            if at >= available {
                 break;
             }
             let value = u16_at(bytes, HEADER + 2 * at).unwrap_or(0);
@@ -494,7 +498,10 @@ fn subcategories(bytes: &[u8]) -> AuditEvents {
     // one u16 between the settings and the counts on every system read
     match room.checked_sub(total) {
         Some(1) => found.unused = u16_at(bytes, HEADER + 2 * total),
-        Some(0) | None => {}
+        Some(0) => found
+            .problems
+            .push("no unused word between settings and counts".to_owned()),
+        None => {}
         Some(left) => found.problems.push(format!(
             "{left} u16s between the settings and the counts, where Windows leaves 1"
         )),
@@ -544,6 +551,9 @@ pub fn audit_policy(security: &Hive) -> Option<AuditPolicy> {
         None => (Vec::new(), Some("no default value".to_owned())),
     };
     problems.extend(why);
+    if bytes.is_empty() && problems.is_empty() {
+        problems.push("empty audit-policy data".to_owned());
+    }
     let events = if bytes.is_empty() {
         AuditEvents::default()
     } else {
@@ -646,6 +656,36 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_revisions_do_not_invent_named_settings() {
+        let mut data = layout(&[&[1]], 0);
+        data[..4].copy_from_slice(&0x200u32.to_le_bytes());
+        let found = audit_events(&data);
+        assert_eq!(found.layout, None);
+        assert_eq!(found.settings, Vec::<AuditSetting>::new());
+        assert!(found.problems.iter().any(|p| p.contains("revision")));
+    }
+
+    #[test]
+    fn a_damaged_count_cannot_turn_the_unused_word_into_a_setting() {
+        let mut data = layout(&[&[1, 2]], 0xffff);
+        let offset = u32_at(&data, 8).unwrap_or(0) as usize;
+        data[offset..offset + 2].copy_from_slice(&5u16.to_le_bytes());
+        let found = audit_events(&data);
+        assert_eq!(found.settings.len(), 2);
+        assert_eq!(found.settings[1].setting, Setting::Failure);
+    }
+
+    #[test]
+    fn legacy_auditing_mode_is_a_boolean_not_an_enum() {
+        let mut data = vec![0u8; CATEGORY_LAYOUT];
+        data[0] = 2;
+        data[40..44].copy_from_slice(&9u32.to_le_bytes());
+        let found = audit_events(&data);
+        assert_eq!(found.layout, Some(Layout::Categories));
+        assert_eq!(found.auditing_mode, Some(true));
+    }
+
+    #[test]
     fn layouts_that_dont_fit() {
         // a category Windows hasn't, a subcategory past the table, a value past 3
         let found = audit_events(&layout(
@@ -680,9 +720,9 @@ mod tests {
         let found = audit_events(&data);
         assert_eq!(
             found.problems,
-            ["the categories count 5 subcategories, the data holds 3 settings"]
+            ["the categories count 5 subcategories, the data holds 2 settings"]
         );
-        assert_eq!(found.settings.len(), 3);
+        assert_eq!(found.settings.len(), 2);
         // bytes past the counts; more unused u16s
         let mut data = layout(&[&[1]], 0);
         data.push(0);
@@ -731,9 +771,11 @@ mod tests {
         data[0] = 1;
         data[1] = 0xff;
         assert_eq!(audit_events(&data).auditing_mode, Some(true));
-        // a first byte that can't be a BOOLEAN is not this layout
+        // LSA treats any nonzero BOOLEAN as enabled; padding is still irrelevant.
         data[0] = 2;
-        assert_eq!(audit_events(&data).layout, None);
+        let found = audit_events(&data);
+        assert_eq!(found.layout, Some(Layout::Categories));
+        assert_eq!(found.auditing_mode, Some(true));
     }
 
     #[test]
