@@ -7160,5 +7160,10 @@ fn network_values_keep_wrong_type_empty_data_and_do_not_invent_times_or_macs() {
             .iter()
             .any(|p| p.contains("NameServer"))
     );
-    assert!(!found.port_proxies[0].problems.is_empty());
+    assert!(
+        found.port_proxies[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("nonempty address/port"))
+    );
 }
