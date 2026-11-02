@@ -3,8 +3,9 @@
 //! setting:
 //!
 //! - **Sysinternals** (`Software\Sysinternals\<tool>`): each tool whose licence the user
-//!   accepted (`EulaAccepted`). The key is made when the tool first runs as that user, so when it
-//!   holds only `EulaAccepted` its last-write time is that first run ([`AppTrace::first_used`]).
+//!   accepted (`EulaAccepted`). When its only value is a readable acceptance set to `1`, the
+//!   last-write time is a first-use estimate ([`AppTrace::first_used`]), not proof of execution.
+//!   Registry settings can also be preconfigured, copied or edited.
 //!   Tools that keep settings there (Process Explorer, Autoruns, …) rewrite the key later.
 //! - **WinRAR** (`Software\WinRAR`): the archives opened (`ArcHistory`), and the archive names and
 //!   extraction folders typed in its dialogs (`DialogEditHistory\ArcName`, `ExtrPath`), each a
@@ -92,8 +93,8 @@ pub struct AppTrace {
     /// Other data, as text: `EulaAccepted`, a OneDrive account's e-mail address or a synced
     /// library's id, a setting's value (a number in decimal, a list's item).
     pub value: Option<String>,
-    /// When a Sysinternals tool first ran as the user: its key's last-write time, when the key
-    /// holds only `EulaAccepted` (FILETIME).
+    /// First-use estimate for a Sysinternals tool: the key's last-write time when its only
+    /// value is a readable `EulaAccepted` set to `1` (FILETIME). Corroborate execution separately.
     pub first_used: Option<u64>,
     /// More, as names and values: an Adobe document's `Version` (Adobe's) and the values beside
     /// its path; a OneDrive account's `DisplayName`, `UserCID`, …

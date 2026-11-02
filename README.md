@@ -205,8 +205,8 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
 - Traces third-party tools leave in `NTUSER.DAT` (`app_history::ntuser`), one `AppTrace` per
   tool, list entry, account or setting, with its `App`, key, value and last-write time: each
   Sysinternals tool whose licence the user accepted (`Software\Sysinternals\<tool>`; its key's
-  last-write time is when it first ran as the user, `first_used`, when the key holds only
-  `EulaAccepted`); WinRAR's archives opened and archive names and extraction folders typed
+  last-write time gives a first-use estimate, `first_used`, when the key holds only
+  a readable `EulaAccepted` set to `1`; corroborate execution separately); WinRAR's archives opened and archive names and extraction folders typed
   (`ArcHistory`, `DialogEditHistory\ArcName`, `ExtrPath`); 7-Zip's archives made, extraction
   folders and folders browsed and copied to (`Compression\ArcHistory`, `Extraction\PathHistory`,
   `FM\FolderHistory`, `FM\CopyHistory`: lists of UTF-16 strings) and its panels' last folders;
