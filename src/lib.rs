@@ -33,6 +33,7 @@ pub mod ntuser;
 pub mod persistence;
 mod recover;
 pub mod sam;
+mod shell;
 pub mod software;
 pub mod system;
 

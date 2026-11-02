@@ -91,6 +91,21 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   whether the sign-in screen hides it; its `Names` entry's RID and time (about when the account
   was made) are matched with it, and what disagrees is reported. `account_flag_names` names the
   flags. Password hashes are not read.
+- Explorer's use of applications in `NTUSER.DAT` hives (`ntuser`), one `AppUsage` per
+  application, button or item: `feature_usage`, the counts of `Explorer\FeatureUsage`'s
+  subkeys (`AppSwitched`, `AppLaunch`, `ShowJumpView`, `AppBadgeUpdated`, `TrayButtonClicked`)
+  per application user model ID, path or button, and `feature_usage_created`, its
+  `KeyCreationTime`; `recent_apps`, `Search\RecentApps` (Windows 10 up to 1709): each
+  application's `AppId`, `AppPath`, `LaunchCount` and `LastAccessedTime`, and the files it
+  opened (`RecentItems`: `DisplayName`, `Path`, `LastAccessedTime`); `taskband`, the programs
+  pinned to the taskbar: each item of `Taskband`'s `Favorites` as a shell item path
+  (`User Pinned\TaskBar\File Explorer.lnk`, or `Applications\<app ID>` for a packaged app)
+  with its application user model ID (`0xBEEF001D`, or a packaged app's property store) and how
+  it was pinned (`0xBEEF001E`), and each link of `FavoritesResolve` with the path its
+  `LinkInfo` (else its target ID list) gives; and `programs_cache`, each shell item list of
+  `StartPage` and `StartPage2`'s `ProgramsCache`, `ProgramsCacheSMP` and `ProgramsCacheTBP`
+  (format versions 1, 9, 12 and 19). A count or time of another type, a list item that isn't
+  understood and a link that isn't one keep their bytes.
 - Autostart locations (`persistence`), one `Autostart` per program, DLL or package a value names
   (a list gives one each), with its `Mechanism` (`name`, and `attack_technique`: its MITRE
   ATT&CK technique, where one fits), key, value, data, program and arguments (`command_line`
@@ -200,6 +215,13 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
   tasks, lists, actions and times as a separate decoder built on yarp, every `Actions` value
   decoded to its last byte.
+- Explorer's use of applications on public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's, Windows XP to 11): the same `ProgramsCache` items
+  (152 on 5 hives) as Plaso's `explorer_programscache`; the same `Favorites` paths (35 on 10
+  hives) as libyal's shell item reader (pyfwsi), with the same 12 packaged app IDs as its
+  property store reader (pyfwps); the same `FavoritesResolve` paths (35) as its link reader
+  (pylnk); and the same `FeatureUsage` counts (228 on 5 hives) and `RecentApps` (4 on 2
+  hives) as its regf reader (pyregf).
 - Local accounts on 7 public `SAM` hives (regipy's and the DFIR Artifact Museum's, Windows 7 to
   11, Server 2012 R2 and 2022; 30 accounts): every `F` and `V` field the same as
   [dissect](https://github.com/fox-it/dissect.target)'s `user_F` and `user_V` structures give,
@@ -227,8 +249,13 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   session entries and `NoEncrypt`; recent
   documents whose list and values don't add up; a task cache built with real Windows 11 `Actions`
   and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
-  way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`); accounts
-  whose `F`, `V` and `Names` disagree or are cut short, with a password hint, a Microsoft account
+  way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`);
+  Explorer's pins and programs cache in regipy's Windows 7 `NTUSER.DAT`, its recent app and
+  packaged apps pinned in its dirty Windows 10 `NTUSER.DAT`, and every kind of `FeatureUsage`
+  count in its `NTUSER_BAGMRU.DAT`; use counts, recent apps and items, pins, links and a
+  programs cache built with values of other types, a shell item that isn't understood, data that
+  isn't a link and an unknown format version; accounts whose `F`, `V` and `Names` disagree or are
+  cut short, with a password hint, a Microsoft account
   and `UserDontShowInLogonUI`; autostarts in regipy's `SYSTEM`, `NTUSER.DAT` and `UsrClass.dat`,
   and in built hives with one of each kind, `StartupApproved` entries enabled, disabled and
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`

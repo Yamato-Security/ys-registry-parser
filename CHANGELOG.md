@@ -52,3 +52,8 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `ntuser`: Explorer's use of applications (`AppUsage`): `feature_usage` (`FeatureUsage`
+  counts per application and button) and `feature_usage_created`, `recent_apps` (`RecentApps`
+  and their `RecentItems`), `taskband` (the taskbar's pins in `Favorites`, with their
+  application IDs and pin types, and `FavoritesResolve`'s links) and `programs_cache` (the shell
+  item lists of `ProgramsCache`, `ProgramsCacheSMP` and `ProgramsCacheTBP`). (@YamatoSecurity)

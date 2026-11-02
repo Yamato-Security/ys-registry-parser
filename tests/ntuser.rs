@@ -1,5 +1,5 @@
 //! The `NTUSER.DAT` of regipy's test data (MIT; `tests/fixtures/regipy/`): its recent documents
-//! and profile. The items, their order and their shortcuts' names are those a reader built on
+//! and profile; Explorer's use counts, recent apps and pins in it and two of its other hives. The items, their order and their shortcuts' names are those a reader built on
 //! yarp and libfwsi gives for the same hive (and for 8 other public `NTUSER.DAT` hives).
 #![allow(clippy::unwrap_used)]
 
@@ -173,4 +173,195 @@ fn user_assist_of_regipy_hives() {
     assert_eq!(problems, Vec::<String>::new());
     assert_eq!(entries.len(), 21);
     assert!(entries.iter().any(|e| e.replayed));
+}
+
+/// Explorer's pins and programs cache in regipy's Windows 7 `NTUSER.DAT`, and its pins and
+/// recent apps in the dirty Windows 10 one: the same `ProgramsCache` items as Plaso's
+/// `explorer_programscache`, and the same `Favorites` and `FavoritesResolve` paths and packaged
+/// app IDs as libyal's shell item, property store and link readers (152 and 70 items of 10
+/// public hives agree the same way).
+#[test]
+#[allow(clippy::too_many_lines)]
+fn explorer_pins_and_programs_cache() {
+    use ys_registry_parser::ntuser::{feature_usage, programs_cache, recent_apps, taskband};
+    let hive = ntuser();
+    assert!(feature_usage(&hive).is_none() && recent_apps(&hive).is_none());
+    let (pins, problems) = taskband(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let got: Vec<(&str, Option<&str>, Option<&str>)> = pins
+        .iter()
+        .map(|p| {
+            assert!(p.problems.is_empty() && p.data_raw.is_none());
+            (
+                p.value_name.as_str(),
+                p.item_path.as_deref(),
+                p.application.as_deref(),
+            )
+        })
+        .collect();
+    let lnk = r"C:\Users\vibranium\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Windows Explorer.lnk";
+    assert_eq!(
+        got[1..5],
+        [
+            (
+                "FavoritesResolve",
+                Some(lnk),
+                Some(r"{F38BF404-1D43-42F2-9305-67DE0B28FC23}\explorer.exe")
+            ),
+            (
+                "FavoritesResolve",
+                Some(
+                    r"C:\Users\vibranium\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Windows Media Player.lnk"
+                ),
+                Some("Microsoft.Windows.MediaPlayer32")
+            ),
+            (
+                "Favorites",
+                Some(r"User Pinned\TaskBar\Internet Explorer.lnk"),
+                Some("Microsoft.InternetExplorer.Default")
+            ),
+            (
+                "Favorites",
+                Some(r"User Pinned\TaskBar\Windows Explorer.lnk"),
+                Some(r"{F38BF404-1D43-42F2-9305-67DE0B28FC23}\explorer.exe")
+            ),
+        ]
+    );
+    assert_eq!(pins.len(), 6);
+    assert!(
+        pins.iter()
+            .all(|p| p.key_last_written == 129_779_645_274_301_576)
+    );
+
+    let (cache, problems) = programs_cache(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let count = |value: &str| cache.iter().filter(|c| c.value_name == value).count();
+    assert_eq!(
+        [
+            count("ProgramsCache"),
+            count("ProgramsCacheSMP"),
+            count("ProgramsCacheTBP")
+        ],
+        [19, 0, 3]
+    );
+    // in the hive's value order: ProgramsCacheTBP, then ProgramsCache
+    let paths: Vec<&str> = cache[3..8]
+        .iter()
+        .map(|c| c.item_path.as_deref().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "Programs",
+            "Internet Explorer.lnk",
+            r"Programs\Accessories",
+            "Command Prompt.lnk",
+            "Notepad.lnk"
+        ]
+    );
+    assert!(cache.iter().all(|c| c.problems.is_empty()));
+    assert_eq!(
+        (cache[2].value_name.as_str(), cache[2].item_path.as_deref()),
+        (
+            "ProgramsCacheTBP",
+            Some(r"User Pinned\TaskBar\Windows Media Player.lnk")
+        )
+    );
+    assert_eq!(cache.last().unwrap().item_path.as_deref(), Some("Help.lnk"));
+
+    // the dirty Windows 10 hive: a recent app, and packaged apps pinned
+    let hive = Hive::open(fixture("transactions_NTUSER.DAT"), &[])
+        .unwrap()
+        .0;
+    let (apps, problems) = recent_apps(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(apps.len(), 1);
+    assert_eq!(
+        (
+            apps[0].application.as_deref(),
+            apps[0].count,
+            apps[0].last_accessed,
+            apps[0].item_path.as_deref()
+        ),
+        (
+            Some(r"D:\setup64.exe"),
+            Some(1),
+            Some(131_443_184_721_780_000),
+            None
+        )
+    );
+    let (pins, _) = taskband(&hive).unwrap();
+    let favorites: Vec<(Option<&str>, Option<&str>)> = pins
+        .iter()
+        .filter(|p| p.value_name == "Favorites")
+        .map(|p| (p.item_path.as_deref(), p.pin_type.as_deref()))
+        .collect();
+    assert_eq!(
+        favorites,
+        [
+            (
+                Some(r"Applications\Microsoft.MicrosoftEdge_8wekyb3d8bbwe!MicrosoftEdge"),
+                None
+            ),
+            (
+                Some(r"User Pinned\TaskBar\File Explorer.lnk"),
+                Some("SystemPinned")
+            ),
+            (
+                Some(r"Applications\Microsoft.WindowsStore_8wekyb3d8bbwe!App"),
+                None
+            ),
+            (
+                Some(
+                    r"Applications\microsoft.windowscommunicationsapps_8wekyb3d8bbwe!microsoft.windowslive.mail"
+                ),
+                None
+            ),
+        ]
+    );
+}
+
+/// `FeatureUsage` of regipy's Windows 10 `NTUSER_BAGMRU.DAT`: every count the same as libyal's
+/// regf reader gives (228 counts of 5 public hives agree the same way).
+#[test]
+fn feature_usage_counts() {
+    use ys_registry_parser::ntuser::{feature_usage, feature_usage_created};
+    let hive = Hive::open(fixture("NTUSER_BAGMRU.DAT"), &[]).unwrap().0;
+    let (entries, problems) = feature_usage(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    assert!(
+        entries
+            .iter()
+            .all(|e| e.problems.is_empty() && e.count.is_some())
+    );
+    let count = |source: &str| entries.iter().filter(|e| e.source == source).count();
+    assert_eq!(
+        [
+            count("AppBadgeUpdated"),
+            count("AppLaunch"),
+            count("AppSwitched"),
+            count("ShowJumpView"),
+            count("TrayButtonClicked")
+        ],
+        [11, 5, 57, 10, 5]
+    );
+    let of = |source: &str, application: &str| {
+        entries
+            .iter()
+            .find(|e| e.source == source && e.application.as_deref() == Some(application))
+            .and_then(|e| e.count)
+    };
+    assert_eq!(of("AppSwitched", "Microsoft.Windows.Explorer"), Some(410));
+    assert_eq!(
+        of(
+            "AppSwitched",
+            r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+        ),
+        Some(185)
+    );
+    assert_eq!(of("TrayButtonClicked", "StartButton"), Some(33));
+    assert_eq!(of("AppLaunch", "MSEdge"), Some(3));
+    let switched = entries.iter().find(|e| e.source == "AppSwitched").unwrap();
+    assert_eq!(switched.key_last_written, 132_982_894_092_004_591);
+    assert_eq!(feature_usage_created(&hive), Some(132_653_766_568_771_977));
 }

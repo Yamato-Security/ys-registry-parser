@@ -8,6 +8,9 @@ use proptest::prelude::*;
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
+use ys_registry_parser::ntuser::{
+    feature_usage, feature_usage_created, programs_cache, recent_apps, taskband,
+};
 use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
@@ -69,6 +72,8 @@ fn read_all(data: Vec<u8>) {
     let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
     let machine = MachineClasses::read(&hive);
+    let _ = (feature_usage(&hive), feature_usage_created(&hive));
+    let _ = (recent_apps(&hive), taskband(&hive), programs_cache(&hive));
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
     let _ = (
@@ -138,5 +143,29 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+    }
+}
+
+/// The Windows 10 NTUSER.DAT with every kind of `FeatureUsage` count and packaged apps pinned,
+/// unpacked once.
+fn ntuser_win10() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| fixture("NTUSER_BAGMRU.DAT"))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Explorer's use counts, recent apps, pins and programs cache damaged: read without a panic.
+    #[test]
+    fn a_damaged_explorer_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(ntuser_win10().to_vec(), flips), &[])
+        {
+            let _ = (feature_usage(&hive), recent_apps(&hive));
+            let _ = (taskband(&hive), programs_cache(&hive));
+        }
     }
 }
