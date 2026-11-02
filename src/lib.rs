@@ -27,6 +27,7 @@
 pub mod app_history;
 pub mod appcompat;
 pub mod audit_policy;
+pub mod bcd;
 mod bytes;
 pub mod comdlg32;
 mod data;

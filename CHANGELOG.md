@@ -5,6 +5,7 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- Do not apply inherited OS-loader-only BCD settings to boot-manager objects. (@YamatoSecurity)
 - AppCompat validates and bounds CIT/LZNT1 decoding, preserves Unicode paths and malformed
   time/value bytes, and keeps shim-path join provenance and diagnostics. (@YamatoSecurity)
 - Audit-policy decoding reserves its unused word even with corrupt counts, rejects unsupported
@@ -179,3 +180,9 @@ First version. (@YamatoSecurity)
   `CIT\System`'s compressed databases, custom shim databases in `InstalledSDB` and `Custom`) and
   `NTUSER.DAT` (`ntuser`: layers, and the Program Compatibility Assistant's `Store` and
   `Persisted`); `lznt1` (LZNT1 decompression) and `sign_media`. (@YamatoSecurity)
+- `bcd`: the objects of `BCD` hives (`bcd`, `BcdObject`, `BcdElement`, `BcdValue`): each
+  object's type, description, path, device, whether it is the default entry, and its elements
+  decoded by their format and named by Microsoft's element types (`element_name`,
+  `object_type_name`, `device_summary`); `recoveryenabled`, `testsigning`, `nointegritychecks`,
+  `safeboot` and `bootstatuspolicy`, own or inherited (`boot_status_policy_name`,
+  `safe_boot_name`). (@YamatoSecurity)

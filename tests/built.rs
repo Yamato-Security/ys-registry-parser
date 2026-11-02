@@ -1363,6 +1363,191 @@ fn recovered_records_said_complete_or_partial() {
     assert_eq!(RecoveredStatus::DeletedPartial.name(), "deleted_partial");
 }
 
+/// A `BCD` element's key and value: `Objects\{object}\Elements\{element:08x}\Element`.
+fn bcd_element(t: &mut Tree, object: &str, element: u32, kind: u32, data: &[u8]) {
+    t.set(
+        &format!(r"Objects\{object}\Elements\{element:08x}"),
+        "Element",
+        kind,
+        data,
+    );
+}
+
+/// A `BCD` object's type: `Objects\{object}\Description\Type`.
+fn bcd_object(t: &mut Tree, object: &str, object_type: u32) {
+    t.dword(
+        &format!(r"Objects\{object}\Description"),
+        "Type",
+        object_type,
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_bcd_store_with_recovery_off_and_test_signing_on() {
+    use ys_registry_parser::bcd::{BcdValue, bcd, boot_status_policy_name, safe_boot_name};
+    const MANAGER: &str = "{9dea862c-5cdd-4e70-acc1-f32b344d4795}";
+    const WINDOWS: &str = "{11111111-2222-3333-4444-555555555555}";
+    const OTHER: &str = "{66666666-7777-8888-9999-aaaaaaaaaaaa}";
+    const SETTINGS: &str = "{6efb52bf-1766-41db-a6b3-0ee5eff72bd7}";
+    const GLOBAL: &str = "{7ea2e1ac-2e61-4728-aaa3-896d9d0a9f0e}";
+    let multi = |items: &[&str]| {
+        let mut data: Vec<u8> = items.iter().flat_map(|i| utf16z(i)).collect();
+        data.extend([0, 0]);
+        data
+    };
+    let mut gpt = vec![0u8; 88];
+    gpt[16] = 6;
+    gpt[24] = 0x48;
+    gpt[32..48].copy_from_slice(&[0x11; 16]);
+    gpt[56..72].copy_from_slice(&[0x22; 16]);
+    let mut t = Tree::default();
+    bcd_object(&mut t, MANAGER, 0x1010_0002);
+    bcd_element(
+        &mut t,
+        MANAGER,
+        0x2300_0003,
+        1,
+        &utf16z(&WINDOWS.to_uppercase()),
+    );
+    bcd_element(&mut t, MANAGER, 0x2400_0001, 7, &multi(&[OTHER, WINDOWS]));
+    bcd_element(&mut t, MANAGER, 0x2500_0004, 3, &[0x1e]);
+    // the default entry: recovery off, failures ignored, integrity checks off, its own
+    bcd_object(&mut t, WINDOWS, 0x1020_0003);
+    bcd_element(&mut t, WINDOWS, 0x1100_0001, 3, &gpt);
+    bcd_element(
+        &mut t,
+        WINDOWS,
+        0x1200_0002,
+        1,
+        &utf16z(r"\Windows\system32\winload.efi"),
+    );
+    bcd_element(&mut t, WINDOWS, 0x1200_0004, 1, &utf16z("Windows 11"));
+    bcd_element(&mut t, WINDOWS, 0x1400_0006, 7, &multi(&[SETTINGS]));
+    bcd_element(&mut t, WINDOWS, 0x1600_0009, 3, &[0]);
+    bcd_element(&mut t, WINDOWS, 0x1600_0048, 3, &[1]);
+    bcd_element(&mut t, WINDOWS, 0x2500_00e0, 3, &1u64.to_le_bytes());
+    // damaged: a boolean of 2, an integer of 9 bytes, an undocumented type, a key that isn't one
+    bcd_element(&mut t, WINDOWS, 0x1600_0040, 3, &[2]);
+    bcd_element(&mut t, WINDOWS, 0x1500_0007, 3, &[0; 9]);
+    bcd_element(&mut t, WINDOWS, 0x1500_0099, 3, &[5]);
+    t.set(
+        &format!(r"Objects\{WINDOWS}\Elements\zz"),
+        "Element",
+        3,
+        &[1],
+    );
+    // another entry, in safe mode, test signing inherited from the loaders' settings, which
+    // inherit the global settings (which inherit them back: read once)
+    bcd_object(&mut t, OTHER, 0x1020_0003);
+    bcd_element(&mut t, OTHER, 0x1200_0004, 1, &utf16z("Test"));
+    bcd_element(&mut t, OTHER, 0x1400_0006, 7, &multi(&[SETTINGS]));
+    bcd_element(&mut t, OTHER, 0x2500_0080, 3, &[0]);
+    bcd_object(&mut t, SETTINGS, 0x2020_0003);
+    bcd_element(&mut t, SETTINGS, 0x1400_0006, 7, &multi(&[GLOBAL]));
+    bcd_element(&mut t, SETTINGS, 0x1600_0049, 3, &[1]);
+    bcd_object(&mut t, GLOBAL, 0x2010_0000);
+    bcd_element(&mut t, GLOBAL, 0x1400_0006, 7, &multi(&[SETTINGS]));
+    bcd_element(&mut t, GLOBAL, 0x1600_0009, 3, &[1]);
+    // an object without its type
+    t.at(r"Objects\{00000000-0000-0000-0000-000000000001}\Elements");
+    let hive = t.hive("NewStoreRoot");
+    let (objects, problems) = bcd(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let find = |guid: &str| objects.iter().find(|o| o.guid == guid).unwrap();
+
+    let windows = find(WINDOWS);
+    assert_eq!(
+        (
+            windows.description.as_deref(),
+            windows.is_default,
+            windows.display_order,
+            windows.path.as_deref(),
+            windows.device.as_deref()
+        ),
+        (
+            Some("Windows 11"),
+            true,
+            Some(1),
+            Some(r"\Windows\system32\winload.efi"),
+            Some(
+                "partition {11111111-1111-1111-1111-111111111111} on disk {22222222-2222-2222-2222-222222222222}"
+            )
+        )
+    );
+    assert_eq!(
+        (
+            windows.recovery_enabled,
+            windows.no_integrity_checks,
+            windows.boot_status_policy,
+            windows.test_signing,
+            windows.safe_boot
+        ),
+        (Some(false), Some(true), Some(1), Some(true), None)
+    );
+    assert_eq!(boot_status_policy_name(1), Some("IgnoreAllFailures"));
+    assert_eq!(windows.inherited, [format!("test_signing from {SETTINGS}")]);
+    let element = |key: &str| windows.elements.iter().find(|e| e.key_name == key).unwrap();
+    assert_eq!(element("16000040").value, BcdValue::Undecoded);
+    assert_eq!(
+        element("16000040").problems,
+        ["boolean 2 is neither 0 nor 1"]
+    );
+    assert_eq!(element("16000040").data_raw.as_deref(), Some(&[2u8][..]));
+    assert_eq!(
+        element("15000007").problems,
+        ["9 bytes are not an integer of 1 to 8"]
+    );
+    assert_eq!(
+        (
+            element("15000099").name,
+            &element("15000099").value,
+            element("15000099").data_raw.as_deref()
+        ),
+        (None, &BcdValue::Integer(5), Some(&[5u8][..]))
+    );
+    assert_eq!(element("zz").element_type, None);
+    assert_eq!(
+        element("zz").problems,
+        ["its key's name is not an element type (8 hexadecimal digits)"]
+    );
+    assert_eq!(
+        element("250000e0").name,
+        Some("BcdOSLoaderInteger_BootStatusPolicy")
+    );
+
+    let other = find(OTHER);
+    assert_eq!(
+        (
+            other.is_default,
+            other.display_order,
+            other.safe_boot,
+            other.test_signing,
+            other.recovery_enabled
+        ),
+        (false, Some(0), Some(0), Some(true), Some(true))
+    );
+    assert_eq!(safe_boot_name(0), Some("Minimal"));
+    assert_eq!(
+        other.inherited,
+        [
+            format!("recovery_enabled from {GLOBAL}"),
+            format!("test_signing from {SETTINGS}")
+        ]
+    );
+    // inherited settings for boot loaders: an OS loader's elements, and the global ones
+    assert_eq!(find(SETTINGS).test_signing, Some(true));
+    assert_eq!(find(SETTINGS).recovery_enabled, Some(true));
+    let manager = find(MANAGER);
+    assert_eq!(manager.type_name, "Windows boot manager");
+    assert_eq!(manager.recovery_enabled, None);
+    let untyped = find("{00000000-0000-0000-0000-000000000001}");
+    assert_eq!(untyped.problems, [r"it has no Description\Type"]);
+    assert_eq!(untyped.type_name, "unknown");
+    // a hive without Objects
+    assert!(bcd(&Tree::default().hive("ROOT")).is_none());
+}
+
 /// Keys and values by their paths, for hives of deep keys.
 #[derive(Default)]
 struct Tree {
@@ -6412,4 +6597,28 @@ fn appcompat_custom_shims_keep_joined_path_damage() {
         .unwrap();
     assert!(row.problems.iter().any(|p| p.contains("UTF-16")));
     assert_eq!(row.data_raw, Some(vec![b'C', 0, 0xff]));
+}
+
+#[test]
+fn bcd_loader_only_settings_do_not_apply_to_a_boot_manager() {
+    use ys_registry_parser::bcd::bcd;
+    let mut t = Tree::default();
+    let manager = "{11111111-1111-1111-1111-111111111111}";
+    let settings = "{22222222-2222-2222-2222-222222222222}";
+    bcd_object(&mut t, manager, 0x1010_0002);
+    bcd_object(&mut t, settings, 0x2020_0003);
+    let mut inherited = utf16z(settings);
+    inherited.extend([0, 0]);
+    bcd_element(&mut t, manager, 0x1400_0006, 7, &inherited);
+    bcd_element(&mut t, settings, 0x2500_0080, 3, &[1]);
+    bcd_element(&mut t, settings, 0x2500_00e0, 3, &[1]);
+    bcd_element(&mut t, settings, 0x2600_0027, 3, &[1]);
+    let hive = t.hive("BCD");
+    let (objects, _) = bcd(&hive).unwrap();
+    let manager = objects.iter().find(|o| o.guid == manager).unwrap();
+    assert_eq!(manager.safe_boot, None);
+    assert_eq!(manager.boot_status_policy, None);
+    assert_eq!(manager.test_signing, None);
+    let settings = objects.iter().find(|o| o.guid == settings).unwrap();
+    assert_eq!(settings.safe_boot, Some(1));
 }

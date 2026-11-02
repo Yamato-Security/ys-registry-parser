@@ -8,6 +8,7 @@ use proptest::prelude::*;
 use ys_registry_parser::app_history;
 use ys_registry_parser::appcompat;
 use ys_registry_parser::audit_policy::{audit_events, audit_policy};
+use ys_registry_parser::bcd::{bcd, device_summary};
 use ys_registry_parser::comdlg32::{dialogs, item_list_problem};
 use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
 use ys_registry_parser::mru::mru_lists;
@@ -183,6 +184,7 @@ fn read_all(data: Vec<u8>) {
         }
     }
     let _ = hive.deleted();
+    let _ = bcd(&hive);
     let _ = connections(&hive);
     let sets = ControlSets::read(&hive);
     let _ = computer_name(&hive);
@@ -266,6 +268,12 @@ proptest! {
     #[test]
     fn a_damaged_hive(flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)) {
         read_all(damage(fixture("SAM"), flips));
+    }
+
+    /// The BCD store's objects and elements damaged: read without a panic.
+    #[test]
+    fn a_damaged_bcd_store(flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)) {
+        read_all(damage(fixture("BCD"), flips));
     }
 }
 
@@ -420,6 +428,7 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (device_summary(&rest), device_summary(&bytes));
         let _ = appcompat::lznt1(&rest, 1 << 16);
         let _ = appcompat::sign_media(&String::from_utf8_lossy(&rest));
         // PolAdtEv: any bytes, and bytes that start as the subcategory layout's header does
