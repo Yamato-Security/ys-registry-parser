@@ -10,6 +10,7 @@ use ys_registry_parser::ntuser::{
 };
 use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
 use ys_registry_parser::sam::accounts;
+use ys_registry_parser::shellbags::shell_bags;
 use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
 use ys_registry_parser::{Data, Hive, RecoveredStatus, Source, Status, decode};
 
@@ -1835,4 +1836,134 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     );
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
+}
+
+/// Each `BagMRU` item as `key: place, slot, data, problems`.
+fn bag_lines(hive: &Hive) -> (Vec<String>, Vec<String>) {
+    let (bags, problems) = shell_bags(hive).unwrap();
+    let lines = bags
+        .iter()
+        .map(|b| {
+            format!(
+                "{} parent={:?} mru={:?} slot={:?} data={:?} own_key={} {:?}",
+                b.key_path(),
+                b.parent,
+                b.mru_position,
+                b.node_slot,
+                b.data,
+                b.last_written.is_some(),
+                b.problems
+            )
+        })
+        .collect();
+    (lines, problems)
+}
+
+#[test]
+fn shell_bags_follow_mru_order_down_each_tree() {
+    const BAG: &str = r"Local Settings\Software\Microsoft\Windows\Shell\BagMRU";
+    let mut t = Tree::default();
+    // BagMRU: 1 then 0 then 3 (no such value); 2 isn't listed; 5 is a subkey without a value;
+    // `x` is no item at all.
+    t.set(BAG, "MRUListEx", 3, &mru(&[1, 0, 3]))
+        .set(BAG, "0", 3, &[1, 0])
+        .set(BAG, "1", 3, &[2, 0])
+        .set(BAG, "2", 3, &[3, 0])
+        .set(BAG, "NodeSlots", 3, &[2, 2]);
+    t.dword(&format!(r"{BAG}\0"), "NodeSlot", 4)
+        .set(&format!(r"{BAG}\0"), "MRUListEx", 3, &mru(&[0]))
+        .set(&format!(r"{BAG}\0"), "0", 1, &utf16z("text"));
+    t.sz(&format!(r"{BAG}\1"), "NodeSlot", "seven");
+    t.dword(&format!(r"{BAG}\5"), "NodeSlot", 9);
+    t.at(&format!(r"{BAG}\x"));
+    // Windows XP's tree, in the same hive for the test.
+    t.set(
+        r"Software\Microsoft\Windows\ShellNoRoam\BagMRU",
+        "MRUListEx",
+        3,
+        &mru(&[0]),
+    )
+    .set(
+        r"Software\Microsoft\Windows\ShellNoRoam\BagMRU",
+        "0",
+        3,
+        &[4, 0],
+    );
+    let hive = t.hive("ROOT");
+    let (lines, problems) = bag_lines(&hive);
+    assert_eq!(
+        problems,
+        [format!(r#"{BAG}: subkey "x" is not a numbered item"#)]
+    );
+    assert_eq!(
+        lines,
+        [
+            format!(r#"{BAG}\1 parent=None mru=Some(0) slot=None data=Some([2, 0]) own_key=true ["NodeSlot: is REG_SZ of 12 bytes, not a REG_DWORD"]"#),
+            format!(r"{BAG}\0 parent=None mru=Some(1) slot=Some(4) data=Some([1, 0]) own_key=true []"),
+            format!(r#"{BAG}\0\0 parent=Some(1) mru=Some(0) slot=None data=Some([116, 0, 101, 0, 120, 0, 116, 0, 0, 0]) own_key=false ["is REG_SZ, not REG_BINARY"]"#),
+            format!(r#"{BAG}\3 parent=None mru=Some(2) slot=None data=None own_key=false ["MRUListEx lists value 3, which is not there"]"#),
+            format!(r#"{BAG}\2 parent=None mru=None slot=None data=Some([3, 0]) own_key=false ["MRUListEx doesn't list it"]"#),
+            format!(r#"{BAG}\5 parent=None mru=None slot=Some(9) data=None own_key=true ["no value 5 in its parent key: its shell item is unknown"]"#),
+            r"Software\Microsoft\Windows\ShellNoRoam\BagMRU\0 parent=None mru=Some(0) slot=None data=Some([4, 0]) own_key=false []".to_owned(),
+        ]
+    );
+    let (bags, _) = shell_bags(&hive).unwrap();
+    assert_eq!(bags[2].parent_key_path(), format!(r"{BAG}\0"));
+    assert!(
+        bags.iter()
+            .all(|b| b.parent_last_written == WHEN && !b.replayed)
+    );
+    assert!(shell_bags(&Tree::default().hive("ROOT")).is_none());
+}
+
+#[test]
+fn a_shell_bag_subkey_that_loops_back_is_read_once() {
+    let mut b = Builder::new();
+    // BagMRU\0\0's subkey list holds BagMRU\0: the walk would go round for ever.
+    let item = b.value("0", 3, &[1, 0], false);
+    let list = b.value("MRUListEx", 3, &mru(&[0]), false);
+    let mid_item = b.value("0", 3, &[2, 0], false);
+    let mid_list = b.value("MRUListEx", 3, &mru(&[0]), false);
+    let mid_values = b.list(&[mid_list, mid_item], false);
+    let inner_item = b.value("0", 3, &[3, 0], false);
+    let inner_list = b.value("MRUListEx", 3, &mru(&[0]), false);
+    let inner_values = b.list(&[inner_list, inner_item], false);
+    let inner_subkeys = b.lf(&[0]);
+    let inner = b.put(
+        &nk("0", 0, (1, inner_subkeys), (2, inner_values), 0x20),
+        false,
+    );
+    let zero_subkeys = b.lf(&[inner]);
+    let zero = b.put(&nk("0", 0, (1, zero_subkeys), (2, mid_values), 0x20), false);
+    let bag = b.key("BagMRU", 0, &[zero], &[list, item], false);
+    let entry = inner_subkeys as usize + 8;
+    b.bin[entry..entry + 4].copy_from_slice(&zero.to_le_bytes());
+    let mut parent = bag;
+    for name in ["Shell", "Windows", "Microsoft", "Software"] {
+        parent = b.key(name, 0, &[parent], &[], false);
+    }
+    let root = b.root(&[parent]);
+    let hive = Hive::from_bytes(b.hive(root)).unwrap();
+    let (bags, problems) = shell_bags(&hive).unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    let keys: Vec<String> = bags
+        .iter()
+        .map(ys_registry_parser::shellbags::ShellBag::key_path)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            r"Software\Microsoft\Windows\Shell\BagMRU\0",
+            r"Software\Microsoft\Windows\Shell\BagMRU\0\0",
+            r"Software\Microsoft\Windows\Shell\BagMRU\0\0\0",
+        ]
+    );
+    assert!(bags[..2].iter().all(|b| b.problems.is_empty()));
+    assert_eq!(bags[2].data.as_deref(), Some(&[3, 0][..]));
+    assert_eq!(
+        bags[2].problems,
+        [
+            "its subkey is a key already read (the hive's subkey lists loop): the items under it are not read again"
+        ]
+    );
 }

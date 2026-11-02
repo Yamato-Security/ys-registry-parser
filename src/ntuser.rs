@@ -435,10 +435,57 @@ pub fn recent_docs(hive: &Hive) -> Option<(Vec<RecentDocs>, Vec<String>)> {
 
 /// The recent documents of one key.
 fn recent_docs_of(key: &Key, extension: Option<String>) -> RecentDocs {
+    let (ordered, list_replayed, problems) = mru_items(key, &[]);
+    let items = ordered
+        .into_iter()
+        .map(|m| match m.value {
+            Some(value) => {
+                let mut doc = item(&value, m.n, m.position, list_replayed);
+                if let Some(problem) = m.problem {
+                    doc.problems.insert(0, problem);
+                }
+                doc
+            }
+            None => RecentDoc {
+                mru_position: m.position,
+                value_index: m.n,
+                replayed: list_replayed,
+                problems: m.problem.into_iter().collect(),
+                ..RecentDoc::default()
+            },
+        })
+        .collect();
+    RecentDocs {
+        extension,
+        last_written: key.last_written(),
+        items,
+        problems,
+    }
+}
+
+/// One numbered value of an MRU key (`RecentDocs`, `BagMRU`, …): where `MRUListEx` puts it.
+pub(crate) struct MruItem<'h> {
+    /// Its place in `MRUListEx` (0: the most recent); `None` when the list doesn't have it.
+    pub(crate) position: Option<u32>,
+    /// Its number: the value's name.
+    pub(crate) n: u32,
+    /// The value; `None` when `MRUListEx` lists a number no value has.
+    pub(crate) value: Option<Value<'h>>,
+    /// Why it is out of the list, or missing.
+    pub(crate) problem: Option<String>,
+}
+
+/// The numbered values of `key` in the order of its `MRUListEx`, then those it doesn't list;
+/// whether that list came from the transaction logs; and what is wrong with the key's values.
+/// Values named in `others` are expected besides the numbered ones (`NodeSlot`, …).
+pub(crate) fn mru_items<'h>(
+    key: &Key<'h>,
+    others: &[&str],
+) -> (Vec<MruItem<'h>>, bool, Vec<String>) {
     let (values, mut problems) = key.values();
     let mut order: Option<(Vec<u32>, bool)> = None;
-    let mut numbered: Vec<(u32, &Value)> = Vec::new();
-    for value in &values {
+    let mut numbered: Vec<(u32, Value<'h>)> = Vec::new();
+    for value in values {
         let name = value.name();
         if name.eq_ignore_ascii_case("MRUListEx") {
             let (bytes, problem) = value.read_data();
@@ -478,7 +525,7 @@ fn recent_docs_of(key: &Key, extension: Option<String>) -> RecentDocs {
                 problems.push(format!("numbered value {n} is present more than once"));
             }
             numbered.push((n, value));
-        } else {
+        } else if !others.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
             problems.push(format!("value {name:?} is not a numbered item"));
         }
     }
@@ -500,35 +547,37 @@ fn recent_docs_of(key: &Key, extension: Option<String>) -> RecentDocs {
         {
             Some((at, (_, value))) => {
                 used.insert(at);
-                items.push(item(value, n, position, list_replayed));
+                items.push(MruItem {
+                    position,
+                    n,
+                    value: Some(*value),
+                    problem: None,
+                });
             }
-            None => items.push(RecentDoc {
-                mru_position: position,
-                value_index: n,
-                replayed: list_replayed,
-                problems: vec![format!("MRUListEx lists value {n}, which is not there")],
-                ..RecentDoc::default()
+            None => items.push(MruItem {
+                position,
+                n,
+                value: None,
+                problem: Some(format!("MRUListEx lists value {n}, which is not there")),
             }),
         }
     }
     for (at, (n, value)) in numbered.iter().enumerate() {
         if !used.contains(&at) {
-            let mut doc = item(value, *n, None, list_replayed);
             let problem = if order_set.contains(n) {
                 format!("another value named {n} already occupies its MRUListEx position")
             } else {
                 "MRUListEx doesn't list it".to_owned()
             };
-            doc.problems.insert(0, problem);
-            items.push(doc);
+            items.push(MruItem {
+                position: None,
+                n: *n,
+                value: Some(*value),
+                problem: Some(problem),
+            });
         }
     }
-    RecentDocs {
-        extension,
-        last_written: key.last_written(),
-        items,
-        problems,
-    }
+    (items, list_replayed, problems)
 }
 
 /// The recent document in value `n`.
