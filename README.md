@@ -91,6 +91,24 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   whether the sign-in screen hides it; its `Names` entry's RID and time (about when the account
   was made) are matched with it, and what disagrees is reported. `account_flag_names` names the
   flags. Password hashes are not read.
+- What a timeline needs to know about a system (`system_info`), from its four machine hives.
+  `system` reads a `SYSTEM` hive's control set in use: the computer's name (and when its key was
+  written), the TCP/IP host name and DNS domain, the time zone (`TimeZone`: its name, standard and
+  daylight names, the biases, `StandardStart` and `DaylightStart`, which are the kernel's
+  `TIME_FIELDS` with the weekday last, not `SYSTEMTIME`s, decoded by `TransitionDate` and said in
+  words by its `describe`), the last shutdown, the processor architecture and the ANSI and OEM code
+  pages; and the Windows versions it was upgraded from (`Setup\Source OS (Updated on …)`: the date
+  in the key's name and the version's values). `software` reads a `SOFTWARE` hive's
+  `CurrentVersion` (`WindowsVersion`: product name, edition, display version, release, version,
+  build and update build revision, service pack, install date and time, registered owner and
+  organization, `SystemRoot`), its profiles (`Profile`: SID, folder, key time, load and unload
+  times, state) and the user who last signed in (`LastLoggedOn`). `machine_sid` gives the
+  computer's SID from a `SAM` hive, and `domains` what LSA's policy in a `SECURITY` hive names: the
+  account domain (the computer's name and SID), the primary domain (the domain it is joined to, or
+  its workgroup) with its SID and when it was set, the domain's and forest's DNS names, the
+  domain's GUID and the computer account's SID. `sid` turns a binary SID into text and
+  `utc_offset` a bias into `UTC-05:00`. Values that don't decode are problems that keep their
+  bytes.
 - Autostart locations (`persistence`), one `Autostart` per program, DLL or package a value names
   (a list gives one each), with its `Mechanism` (`name`, and `attack_technique`: its MITRE
   ATT&CK technique, where one fits), key, value, data, program and arguments (`command_line`
@@ -210,6 +228,20 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   one record whose type no Windows value has; on those two dirty hives and the DFIR Artifact
   Museum's Windows 11 `SYSTEM`, every key and value that yarp's replay removes or changes is
   recovered from the hive before the replay.
+- System details on public hives of 12 systems (regipy's, Plaso's, notatin's, the DFIR Artifact
+  Museum's and one more public Windows 7 test set; Windows 7 to 11, 8.1, Server 2012 R2 and 2022;
+  12 `SYSTEM`, 9 `SOFTWARE`, 9 `SAM` and 8 `SECURITY` hives, read as they are): the same control
+  set, computer name and its key's time, host name, DNS domain, time zone values and key time,
+  last shutdown and processor architecture as regipy's `active_control_set`, `computer_name`,
+  `host_domain_name`, `timezone_data2`, `shutdown` and `processor_architecture`, but for one
+  `HostName` that regipy, matching value names by case, doesn't find; the same version values,
+  profiles (49, with their times, state and flags) and last signed-in user as its
+  `winver_plugin`, `profilelist_plugin` and `last_logon_plugin`; the same earlier versions as its
+  `previous_winver_plugin`; the same computer SIDs as its `local_sid`, and the same domain names
+  and SIDs as its `domain_sid` (728 values in all). Plaso's `windows_version`, `windows_timezone`
+  and `windows_shutdown` give the same 174 values. The daylight saving changes and biases are those
+  of the zone's `TZI` value in the system's `SOFTWARE` hive on all 8 that have one (an Easter
+  Island zone shows the weekday is last).
 - Autostarts on 10 public `SOFTWARE` and `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
   artemis' and the DFIR Artifact Museum's Windows 10 ones): the same `Run`, `RunOnce`,
   `RunServices` and `Policies\Explorer\Run` values (27) as regipy's `software_plugin` and
@@ -234,7 +266,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
-  machine's; random damage, and random `Actions`, `F` and `V`.
+  machine's; regipy's `SYSTEM` (computer name, host name, domain, time zone with its changes,
+  last shutdown, architecture, code pages), `SAM` (the computer's SID) and `SECURITY` (a
+  workgroup's policy); built `SYSTEM`, `SOFTWARE` and `SECURITY` hives with every value read, an
+  Easter Island time zone, earlier versions, profiles with half a load time, a domain-joined
+  policy, and values of the wrong type or size; random damage (a damaged `SECURITY` hive too),
+  and random `Actions`, `F`, `V`, SIDs and `TIME_FIELDS`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose

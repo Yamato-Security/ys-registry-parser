@@ -12,6 +12,9 @@ use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::sam::{accounts, user_f, user_v};
 use ys_registry_parser::software::{dynamic_info, profile_list, task_actions, task_cache};
 use ys_registry_parser::system::{ControlSets, computer_name, services};
+use ys_registry_parser::system_info::{
+    self, TransitionDate, domains, machine_sid, sid, utc_offset,
+};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!(
@@ -29,6 +32,12 @@ fn fixture(name: &str) -> Vec<u8> {
 fn system() -> &'static [u8] {
     static SYSTEM: OnceLock<Vec<u8>> = OnceLock::new();
     SYSTEM.get_or_init(|| fixture("SYSTEM"))
+}
+
+/// The SECURITY hive, unpacked once.
+fn security() -> &'static [u8] {
+    static SECURITY: OnceLock<Vec<u8>> = OnceLock::new();
+    SECURITY.get_or_init(|| fixture("SECURITY"))
 }
 
 /// The NTUSER.DAT hive, unpacked once.
@@ -68,6 +77,13 @@ fn read_all(data: Vec<u8>) {
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
+    let found = system_info::system(&hive);
+    if let Some(zone) = &found.time_zone {
+        let _ = zone.standard_start.map(|d| d.describe());
+        let _ = zone.bias.map(utc_offset);
+    }
+    let _ = (system_info::software(&hive), machine_sid(&hive));
+    let _ = domains(&hive);
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -109,6 +125,13 @@ proptest! {
     }
 
     #[test]
+    fn a_damaged_security_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)
+    ) {
+        read_all(damage(security().to_vec(), flips));
+    }
+
+    #[test]
     fn a_damaged_ntuser_hive(
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
     ) {
@@ -138,5 +161,8 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (sid(&rest), sid(&bytes));
+        let _ = TransitionDate::from_bytes(&rest).map(|d| d.describe());
+        let _ = utc_offset(i32::from_le_bytes([version as u8, 0, 0, 0]).wrapping_mul(-1_000_003));
     }
 }

@@ -11,6 +11,7 @@ use ys_registry_parser::ntuser::{
 use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
 use ys_registry_parser::sam::accounts;
 use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
+use ys_registry_parser::system_info::{domains, software, system};
 use ys_registry_parser::{Data, Hive, RecoveredStatus, Source, Status, decode};
 
 /// 2022-02-08T21:03:52Z.
@@ -1835,4 +1836,502 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     );
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
+}
+
+/// A `TIME_FIELDS`: year, month, day, hour, minute, second, milliseconds, weekday.
+fn time_fields(fields: [u16; 8]) -> Vec<u8> {
+    fields.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn system_details_of_a_built_system() {
+    let zone = r"ControlSet002\Control\TimeZoneInformation";
+    let upgrade = r"Setup\Source OS (Updated on 5/16/2019 00:55:20)";
+    let mut t = Tree::default();
+    t.dword("Select", "Current", 2)
+        .sz(
+            r"ControlSet001\Control\ComputerName\ComputerName",
+            "ComputerName",
+            "OLDNAME",
+        )
+        .sz(
+            r"ControlSet002\Control\ComputerName\ComputerName",
+            "ComputerName",
+            "HOST1",
+        )
+        .sz(
+            r"ControlSet002\Services\Tcpip\Parameters",
+            "HostName",
+            "host1",
+        )
+        // a workgroup's Domain, on some systems: a REG_DWORD 0
+        .dword(r"ControlSet002\Services\Tcpip\Parameters", "Domain", 0)
+        .sz(zone, "TimeZoneKeyName", "Easter Island Standard Time")
+        .sz(zone, "StandardName", "@tzres.dll,-2372")
+        .dword(zone, "Bias", 360)
+        .dword(zone, "StandardBias", 0)
+        .dword(zone, "DaylightBias", (-60i32).cast_unsigned())
+        .dword(zone, "ActiveTimeBias", 300)
+        // the kernel's TIME_FIELDS: the first Saturday (weekday 6, last) at 22:00
+        .set(
+            zone,
+            "StandardStart",
+            3,
+            &time_fields([0, 4, 1, 22, 0, 0, 0, 6]),
+        )
+        .set(
+            zone,
+            "DaylightStart",
+            3,
+            &time_fields([0, 9, 1, 22, 0, 0, 0, 6]),
+        )
+        .dword(zone, "DynamicDaylightTimeDisabled", 1)
+        .dword(zone, "RealTimeIsUniversal", 1)
+        .set(
+            r"ControlSet002\Control\Windows",
+            "ShutdownTime",
+            3,
+            &WHEN.to_le_bytes(),
+        )
+        .sz(
+            r"ControlSet002\Control\Session Manager\Environment",
+            "PROCESSOR_ARCHITECTURE",
+            "ARM64",
+        )
+        .sz(r"ControlSet002\Control\Nls\CodePage", "ACP", "932")
+        .sz(r"ControlSet002\Control\Nls\CodePage", "OEMCP", "932")
+        .dword("Setup", "SetupType", 0)
+        .sz(upgrade, "ProductName", "Windows 10 Pro")
+        .sz(upgrade, "EditionID", "Professional")
+        .sz(upgrade, "CurrentBuild", "17134")
+        .dword(upgrade, "UBR", 765)
+        .sz(upgrade, "ReleaseId", "1803")
+        .dword(upgrade, "InstallDate", 1_548_585_572)
+        .set(
+            upgrade,
+            "InstallTime",
+            11,
+            &131_930_591_728_980_553u64.to_le_bytes(),
+        )
+        // a name whose date isn't one
+        .sz(
+            r"Setup\Source OS (Updated on 13/40/2019 00:55:20)",
+            "ProductName",
+            "Windows 10 Home",
+        )
+        .at(r"Setup\Status");
+    let found = system(&t.hive("ROOT"));
+    assert_eq!(found.problems, Vec::<String>::new());
+    assert_eq!((found.control_set, found.is_current), (Some(2), true));
+    assert_eq!(found.computer_name.as_deref(), Some("HOST1"));
+    assert_eq!(found.computer_name_last_written, Some(WHEN));
+    // value names in any case
+    assert_eq!(found.hostname.as_deref(), Some("host1"));
+    assert_eq!(found.domain, None);
+    assert_eq!(found.last_shutdown, Some(WHEN));
+    assert_eq!(found.processor_architecture.as_deref(), Some("ARM64"));
+    assert_eq!(found.ansi_code_page.as_deref(), Some("932"));
+    let zone = found.time_zone.unwrap();
+    assert_eq!(zone.name(), Some("Easter Island Standard Time"));
+    assert_eq!(
+        (
+            zone.bias,
+            zone.standard_bias,
+            zone.daylight_bias,
+            zone.active_time_bias
+        ),
+        (Some(360), Some(0), Some(-60), Some(300))
+    );
+    assert_eq!(
+        zone.standard_start.and_then(|d| d.describe()).as_deref(),
+        Some("first Saturday of April, 22:00")
+    );
+    assert_eq!(
+        zone.daylight_start.and_then(|d| d.describe()).as_deref(),
+        Some("first Saturday of September, 22:00")
+    );
+    assert_eq!(
+        (
+            zone.dynamic_daylight_time_disabled,
+            zone.real_time_is_universal
+        ),
+        (Some(true), Some(true))
+    );
+    let versions: Vec<_> = found
+        .previous_versions
+        .iter()
+        .map(|p| {
+            (
+                p.key_name.as_str(),
+                p.updated_on.as_deref(),
+                p.version.product_name.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        versions,
+        [
+            (
+                "Source OS (Updated on 5/16/2019 00:55:20)",
+                Some("2019-05-16T00:55:20"),
+                Some("Windows 10 Pro")
+            ),
+            (
+                "Source OS (Updated on 13/40/2019 00:55:20)",
+                None,
+                Some("Windows 10 Home")
+            ),
+        ]
+    );
+    let v = &found.previous_versions[0].version;
+    assert_eq!(
+        (
+            v.edition_id.as_deref(),
+            v.current_build.as_deref(),
+            v.ubr,
+            v.release_id.as_deref(),
+            v.install_date,
+            v.install_time
+        ),
+        (
+            Some("Professional"),
+            Some("17134"),
+            Some(765),
+            Some("1803"),
+            Some(1_548_585_572),
+            Some(131_930_591_728_980_553)
+        )
+    );
+    assert_eq!(v.key_path, upgrade);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn system_details_that_dont_decode() {
+    let zone = r"ControlSet001\Control\TimeZoneInformation";
+    let mut t = Tree::default();
+    t.sz(zone, "Bias", "300")
+        .set(zone, "TimeZoneKeyName", 3, b"Tokyo")
+        .set(zone, "StandardStart", 3, &[0; 15])
+        .set(
+            zone,
+            "DaylightStart",
+            3,
+            &time_fields([0, 0, 0, 0, 0, 0, 0, 0]),
+        )
+        .set(
+            r"ControlSet001\Control\Windows",
+            "ShutdownTime",
+            3,
+            &[1, 2, 3],
+        )
+        .set(
+            r"ControlSet001\Control\ComputerName\ComputerName",
+            "ComputerName",
+            4,
+            &[1, 2],
+        );
+    // no Select: the first control set
+    let found = system(&t.hive("ROOT"));
+    assert_eq!((found.control_set, found.is_current), (Some(1), false));
+    assert_eq!(
+        found.problems,
+        [
+            r"ControlSet001\Control\ComputerName\ComputerName\ComputerName: is REG_DWORD, not a string",
+            r"ControlSet001\Control\TimeZoneInformation\TimeZoneKeyName: is REG_BINARY, not a string",
+            r"ControlSet001\Control\TimeZoneInformation\Bias: is REG_SZ, not REG_DWORD",
+            r"ControlSet001\Control\TimeZoneInformation\StandardStart: 15 bytes, not the 16 of a TIME_FIELDS (000000000000000000000000000000)",
+            r"ControlSet001\Control\Windows\ShutdownTime: 3 bytes (010203), not a FILETIME",
+        ]
+    );
+    let zone = found.time_zone.unwrap();
+    assert_eq!(
+        (zone.name(), zone.bias, zone.standard_start),
+        (None, None, None)
+    );
+    // a month of 0: no daylight saving time
+    assert_eq!(zone.daylight_start.map(|d| d.is_set()), Some(false));
+    assert_eq!((found.computer_name, found.last_shutdown), (None, None));
+    // a hive without control sets
+    let found = system(&Tree::default().hive("ROOT"));
+    assert_eq!(
+        (found.control_set, found.time_zone, found.problems.len()),
+        (None, None, 0)
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn software_details_of_a_built_software_hive() {
+    let version = r"Microsoft\Windows NT\CurrentVersion";
+    let profiles = r"Microsoft\Windows NT\CurrentVersion\ProfileList";
+    let alice = format!(r"{profiles}\S-1-5-21-1-2-3-1001");
+    let bob = format!(r"{profiles}\S-1-5-21-1-2-3-1002");
+    let logon = r"Microsoft\Windows\CurrentVersion\Authentication\LogonUI";
+    let mut t = Tree::default();
+    t.sz(version, "ProductName", "Windows 10 Pro")
+        .sz(version, "EditionID", "Professional")
+        .sz(version, "DisplayVersion", "23H2")
+        .sz(version, "ReleaseId", "2009")
+        .sz(version, "CurrentVersion", "6.3")
+        .dword(version, "CurrentMajorVersionNumber", 10)
+        .dword(version, "CurrentMinorVersionNumber", 0)
+        .sz(version, "CurrentBuildNumber", "22631")
+        .dword(version, "UBR", 4317)
+        .sz(version, "InstallationType", "Client")
+        .dword(version, "InstallDate", 1_700_000_000)
+        .set(version, "InstallTime", 11, &WHEN.to_le_bytes())
+        .sz(version, "RegisteredOwner", "alice")
+        .sz(version, "RegisteredOrganization", "")
+        .sz(version, "SystemRoot", r"C:\Windows")
+        .sz(
+            &format!(r"{profiles}\S-1-5-18"),
+            "ProfileImagePath",
+            r"%systemroot%\system32\config\systemprofile",
+        )
+        .dword(&format!(r"{profiles}\S-1-5-18"), "Flags", 12)
+        .sz(&alice, "ProfileImagePath", r"C:\Users\alice")
+        .dword(&alice, "LocalProfileLoadTimeHigh", (WHEN >> 32) as u32)
+        .dword(&alice, "LocalProfileLoadTimeLow", WHEN as u32)
+        .dword(
+            &alice,
+            "LocalProfileUnloadTimeHigh",
+            ((WHEN + 1) >> 32) as u32,
+        )
+        .dword(&alice, "LocalProfileUnloadTimeLow", (WHEN + 1) as u32)
+        .dword(&alice, "ProfileLoadTimeHigh", 0)
+        .dword(&alice, "ProfileLoadTimeLow", 0)
+        .dword(&alice, "State", 0)
+        .sz(&bob, "ProfileImagePath", r"C:\Users\bob")
+        // half a time, and a State that isn't a number
+        .dword(&bob, "LocalProfileLoadTimeHigh", (WHEN >> 32) as u32)
+        .sz(&bob, "State", "256")
+        .sz(logon, "LastLoggedOnUser", r".\alice")
+        .sz(logon, "LastLoggedOnSAMUser", r".\alice")
+        .sz(logon, "LastLoggedOnUserSID", "S-1-5-21-1-2-3-1001")
+        .sz(logon, "LastLoggedOnDisplayName", "Alice");
+    let found = software(&t.hive("ROOT"));
+    assert_eq!(found.problems, Vec::<String>::new());
+    let v = found.version.unwrap();
+    assert_eq!(v.problems, Vec::<String>::new());
+    assert_eq!(
+        (
+            v.product_name.as_deref(),
+            v.edition_id.as_deref(),
+            v.display_version.as_deref(),
+            v.release_id.as_deref(),
+            v.current_build.as_deref(),
+            v.ubr
+        ),
+        (
+            Some("Windows 10 Pro"),
+            Some("Professional"),
+            Some("23H2"),
+            Some("2009"),
+            // CurrentBuildNumber without CurrentBuild
+            Some("22631"),
+            Some(4317)
+        )
+    );
+    assert_eq!(
+        (
+            v.current_version.as_deref(),
+            v.major_version,
+            v.minor_version
+        ),
+        (Some("6.3"), Some(10), Some(0))
+    );
+    assert_eq!(
+        (v.install_date, v.install_time),
+        (Some(1_700_000_000), Some(WHEN))
+    );
+    assert_eq!(
+        (
+            v.registered_owner.as_deref(),
+            v.registered_organization.as_deref(),
+            v.system_root.as_deref(),
+            v.installation_type.as_deref(),
+            v.csd_version.as_deref()
+        ),
+        (
+            Some("alice"),
+            None,
+            Some(r"C:\Windows"),
+            Some("Client"),
+            None
+        )
+    );
+    assert_eq!(v.key_path, version);
+    let got: Vec<_> = found
+        .profiles
+        .iter()
+        .map(|p| {
+            (
+                p.sid.as_str(),
+                p.path.as_deref(),
+                p.load_time,
+                p.local_load_time,
+                p.local_unload_time,
+                p.state,
+                p.flags,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "S-1-5-18",
+                Some(r"%systemroot%\system32\config\systemprofile"),
+                None,
+                None,
+                None,
+                None,
+                Some(12)
+            ),
+            (
+                "S-1-5-21-1-2-3-1001",
+                Some(r"C:\Users\alice"),
+                None,
+                Some(WHEN),
+                Some(WHEN + 1),
+                Some(0),
+                None
+            ),
+            (
+                "S-1-5-21-1-2-3-1002",
+                Some(r"C:\Users\bob"),
+                None,
+                None,
+                None,
+                None,
+                None
+            ),
+        ]
+    );
+    assert_eq!(
+        found.profiles[2].problems,
+        [format!(r"{bob}\State: is REG_SZ, not REG_DWORD")]
+    );
+    let last = found.last_logged_on.unwrap();
+    assert_eq!(
+        (
+            last.user.as_deref(),
+            last.sam_user.as_deref(),
+            last.user_sid.as_deref(),
+            last.display_name.as_deref(),
+            last.key_last_written
+        ),
+        (
+            Some(r".\alice"),
+            Some(r".\alice"),
+            Some("S-1-5-21-1-2-3-1001"),
+            Some("Alice"),
+            WHEN
+        )
+    );
+    // a hive without these keys
+    let none = software(&Tree::default().hive("ROOT"));
+    assert!(none.version.is_none() && none.profiles.is_empty() && none.last_logged_on.is_none());
+}
+
+/// A `UNICODE_STRING` as LSA keeps it: length, maximum length, the text's offset, the text.
+fn lsa_string(text: &str) -> Vec<u8> {
+    let units: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut b = (units.len() as u16).to_le_bytes().to_vec();
+    b.extend(((units.len() + 2) as u16).to_le_bytes());
+    b.extend(8u32.to_le_bytes());
+    b.extend(&units);
+    b.extend([0, 0]);
+    b
+}
+
+/// A SID `S-1-5-<subs>`.
+fn sid_bytes(subs: &[u32]) -> Vec<u8> {
+    let mut b = vec![1, subs.len() as u8, 0, 0, 0, 0, 0, 5];
+    b.extend(subs.iter().flat_map(|s| s.to_le_bytes()));
+    b
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn domains_of_a_built_security_hive() {
+    let guid = [
+        0x3f, 0xe3, 0xa0, 0x1e, 0xa1, 0xfa, 0x62, 0x41, 0xb5, 0x25, 0x3e, 0xd8, 0x0c, 0x00, 0xc1,
+        0xad,
+    ];
+    let mut t = Tree::default();
+    t.set(r"Policy\PolAcDmN", "", 0, &lsa_string("HOST1"))
+        .set(r"Policy\PolAcDmS", "", 0, &sid_bytes(&[21, 1, 2, 3]))
+        .set(r"Policy\PolPrDmN", "", 0, &lsa_string("CORP"))
+        .set(r"Policy\PolPrDmS", "", 0, &sid_bytes(&[21, 7, 8, 9]))
+        .set(r"Policy\PolDnDDN", "", 0, &lsa_string("corp.example.com"))
+        .set(r"Policy\PolDnTrN", "", 0, &lsa_string("example.com"))
+        .set(r"Policy\PolDnDmG", "", 0, &guid)
+        .set(
+            r"Policy\PolMachineAccountS",
+            "",
+            0,
+            &sid_bytes(&[21, 7, 8, 9, 1105]),
+        );
+    let found = domains(&t.hive("ROOT")).unwrap();
+    assert_eq!(found.problems, Vec::<String>::new());
+    assert_eq!(
+        (
+            found.account_domain_name.as_deref(),
+            found.account_domain_sid.as_deref(),
+            found.primary_domain_name.as_deref(),
+            found.primary_domain_sid.as_deref(),
+            found.primary_domain_last_written
+        ),
+        (
+            Some("HOST1"),
+            Some("S-1-5-21-1-2-3"),
+            Some("CORP"),
+            Some("S-1-5-21-7-8-9"),
+            Some(WHEN)
+        )
+    );
+    assert_eq!(
+        (
+            found.dns_domain_name.as_deref(),
+            found.dns_forest_name.as_deref(),
+            found.domain_guid.as_deref(),
+            found.machine_account_sid.as_deref()
+        ),
+        (
+            Some("corp.example.com"),
+            Some("example.com"),
+            Some("{1ea0e33f-faa1-4162-b525-3ed80c00c1ad}"),
+            Some("S-1-5-21-7-8-9-1105")
+        )
+    );
+
+    // a name past its bytes, a SID that isn't one, a GUID cut short, a zero GUID
+    let mut long = lsa_string("CORP");
+    long[0] = 0x40;
+    let mut t = Tree::default();
+    t.set(r"Policy\PolPrDmN", "", 0, &long)
+        .set(r"Policy\PolAcDmS", "", 0, &[1, 4, 0, 0])
+        .set(r"Policy\PolDnDmG", "", 0, &guid[..15])
+        .set(r"Policy\PolPrDmS", "", 0, &[]);
+    let found = domains(&t.hive("ROOT")).unwrap();
+    assert_eq!(
+        found.problems,
+        [
+            r"Policy\PolPrDmN: a text of 64 bytes at 8, past the 18 bytes (40000a000800000043004f00520050000000)",
+            r"Policy\PolAcDmS: not a SID (01040000)",
+            r"Policy\PolDnDmG: 15 bytes (3fe3a01ea1fa6241b5253ed80c00c1), not a GUID",
+        ]
+    );
+    assert_eq!(
+        (found.primary_domain_name, found.primary_domain_sid),
+        (None, None)
+    );
+    assert_eq!(found.primary_domain_last_written, Some(WHEN));
+    let mut t = Tree::default();
+    t.set(r"Policy\PolDnDmG", "", 0, &[0; 16]);
+    assert_eq!(domains(&t.hive("ROOT")).unwrap().domain_guid, None);
+    assert!(domains(&Tree::default().hive("ROOT")).is_none());
 }

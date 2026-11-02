@@ -52,3 +52,12 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `system_info`: what a timeline needs to know about a system. `system` (`SystemDetails`): a
+  `SYSTEM` hive's computer name, host name and DNS domain, time zone (`TimeZone`, with
+  `StandardStart` and `DaylightStart` decoded as the kernel's `TIME_FIELDS` by `TransitionDate`),
+  last shutdown, processor architecture, code pages, and the versions it was upgraded from
+  (`PreviousVersion`); `software` (`SoftwareDetails`): a `SOFTWARE` hive's Windows version
+  (`WindowsVersion`), profiles (`Profile`, with load and unload times) and last signed-in user
+  (`LastLoggedOn`); `machine_sid`: a `SAM` hive's computer SID; `domains` (`Domains`): the account
+  and primary domains, DNS names, domain GUID and computer account SID in a `SECURITY` hive's LSA
+  policy; `sid` and `utc_offset`. (@YamatoSecurity)
