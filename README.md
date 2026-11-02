@@ -127,7 +127,8 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `vid_pid`), its serial number (`serial`: without the logical unit, and none when Windows made
   the instance up), `FriendlyName`, `ContainerID`, driver, and the times its device properties
   keep (`{83da6326-97a6-4088-9453-a1923f573b29}`, in the Windows 8+ and the Windows 7 layout):
-  install (`0064`), first install (`0065`), last arrival (`0066`) and last removal (`0067`);
+  driver last installed (`0064`), device first install (`0065`), last arrival (`0066`) and last
+  removal (`0067`);
   `MountedDevices` (`mounted_devices`: each drive letter's and volume GUID's MBR disk signature
   and offset, GPT partition, or device path, and the device a path names, `device_ref`); from
   `SOFTWARE`, `Windows Portable Devices` (`portable_devices`: the name Explorer gave a device or

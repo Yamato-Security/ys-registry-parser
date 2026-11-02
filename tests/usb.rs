@@ -70,8 +70,8 @@ fn devices_and_their_windows_7_times() {
         );
         assert_eq!(
             (
-                hp.install,
-                hp.first_install,
+                hp.driver_last_installed,
+                hp.device_first_install,
                 hp.last_arrival,
                 hp.last_removal
             ),

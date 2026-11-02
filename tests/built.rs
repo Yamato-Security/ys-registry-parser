@@ -1879,7 +1879,7 @@ fn usb_devices_with_their_times() {
     ] {
         devprop(&mut t, stick, id, time);
     }
-    // Windows 7: Data (and Type) in 000000NN\00000000; only install times
+    // Windows 7: Data (and Type) in 000000NN\00000000; only the install times
     for id in ["00000064", "00000065"] {
         let at =
             format!(r"{old}\Properties\{{83da6326-97a6-4088-9453-a1923f573b29}}\{id}\00000000");
@@ -1925,8 +1925,8 @@ fn usb_devices_with_their_times() {
                 d.pid,
                 d.serial,
                 d.friendly_name,
-                d.install.map(|t| t - WHEN),
-                d.first_install.map(|t| t - WHEN),
+                d.driver_last_installed.map(|t| t - WHEN),
+                d.device_first_install.map(|t| t - WHEN),
                 d.last_arrival.map(|t| t - WHEN),
                 d.last_removal.map(|t| t - WHEN),
                 d.problems,

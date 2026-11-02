@@ -14,7 +14,9 @@
 //! A device's times are device properties under `Properties\{83da6326-97a6-4088-9453-a1923f573b29}`,
 //! as `devpkey.h` numbers them: 0x64 `DEVPKEY_Device_InstallDate`, 0x65
 //! `DEVPKEY_Device_FirstInstallDate`, 0x66 `DEVPKEY_Device_LastArrivalDate` and 0x67
-//! `DEVPKEY_Device_LastRemovalDate`. Windows 8 and later keep each as the default value of a key
+//! `DEVPKEY_Device_LastRemovalDate`; [`Device`] calls the first two `driver_last_installed` and
+//! `device_first_install` (many DFIR references swap these two labels; this follows `devpkey.h`).
+//! Windows 8 and later keep each as the default value of a key
 //! named `0064` … `0067` (of type `0xffff0010`: `DEVPROP_TYPE_FILETIME`); Windows 7 as the `Data`
 //! value of a `00000064\00000000` key.
 
@@ -237,9 +239,9 @@ pub struct Device {
     /// `LocationInformation`.
     pub location: Option<String>,
     /// When its driver was last installed (property 0x64, FILETIME).
-    pub install: Option<u64>,
+    pub driver_last_installed: Option<u64>,
     /// When it was first installed (property 0x65, FILETIME).
-    pub first_install: Option<u64>,
+    pub device_first_install: Option<u64>,
     /// When it last arrived (property 0x66, FILETIME; Windows 8 and later).
     pub last_arrival: Option<u64>,
     /// When it was last removed (property 0x67, FILETIME; Windows 8 and later).
@@ -330,8 +332,8 @@ fn device(class: DeviceClass, set: u32, base: &str, device: Option<&str>, key: &
         driver: None,
         service: None,
         location: None,
-        install: None,
-        first_install: None,
+        driver_last_installed: None,
+        device_first_install: None,
         last_arrival: None,
         last_removal: None,
         last_written: key.last_written(),
@@ -392,8 +394,8 @@ fn device_times(key: &Key, d: &mut Device) {
             (name.len() == 4 || name.len() == 8) && name.bytes().all(|b| b.is_ascii_hexdigit())
         });
         let slot = match id {
-            Some(0x64) => &mut d.install,
-            Some(0x65) => &mut d.first_install,
+            Some(0x64) => &mut d.driver_last_installed,
+            Some(0x65) => &mut d.device_first_install,
             Some(0x66) => &mut d.last_arrival,
             Some(0x67) => &mut d.last_removal,
             _ => continue,
