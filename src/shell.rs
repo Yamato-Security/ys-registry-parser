@@ -224,7 +224,7 @@ fn string_property(storage: &[u8], id: u32) -> Option<String> {
         let value = storage.get(at..at.checked_add(size)?)?;
         if u32_at(value, 4) == Some(id) && u16_at(value, 9) == Some(VT_LPWSTR) {
             let chars = u32_at(value, 13)? as usize;
-            let text = value.get(17..17 + chars.checked_mul(2)?)?;
+            let text = value.get(17..17usize.checked_add(chars.checked_mul(2)?)?)?;
             let units = utf16_units(text);
             let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
             return Some(String::from_utf16_lossy(&units[..end]));
@@ -243,6 +243,9 @@ pub(crate) fn link(link: &[u8]) -> Result<ItemList, String> {
     if u32_at(link, 0) != Some(0x4c) || link.get(4..20) != Some(&LINK_CLSID) {
         return Err("not shell link data (no 0x4C header with the shell link class ID)".to_owned());
     }
+    if link.len() < 0x4c {
+        return Err("its shell link header is cut short".to_owned());
+    }
     let flags = u32_at(link, 0x14).unwrap_or(0);
     let mut at = 0x4c;
     let mut target = ItemList::default();
@@ -257,7 +260,7 @@ pub(crate) fn link(link: &[u8]) -> Result<ItemList, String> {
     if flags & 0x02 != 0 {
         let size = u32_at(link, at).ok_or("its LinkInfo is cut short")? as usize;
         let info = link
-            .get(at..at + size)
+            .get(at..at.checked_add(size).ok_or("its LinkInfo size overflows")?)
             .filter(|_| size >= 0x1c)
             .ok_or_else(|| format!("its LinkInfo of {size} bytes is cut short or too small"))?;
         if let Some(path) = link_info_path(info) {
@@ -277,7 +280,14 @@ pub(crate) fn link(link: &[u8]) -> Result<ItemList, String> {
 fn link_info_path(info: &[u8]) -> Option<String> {
     let header = u32_at(info, 4).unwrap_or(0) as usize;
     let info_flags = u32_at(info, 8).unwrap_or(0);
-    let offset = |at: usize| u32_at(info, at).map(|o| o as usize).filter(|&o| o > 0);
+    if (header != 0x1c && header < 0x24) || header > info.len() {
+        return None;
+    }
+    let offset = |at: usize| {
+        u32_at(info, at)
+            .map(|o| o as usize)
+            .filter(|&o| o >= header && o < info.len())
+    };
     let ansi_at = |at: usize| offset(at).and_then(|o| info.get(o..)).map(ansi);
     let unicode_at = |at: usize| {
         offset(at).and_then(|o| info.get(o..)).map(|b| {
@@ -301,9 +311,14 @@ fn link_info_path(info: &[u8]) -> Option<String> {
         None
     };
     let base = base.filter(|b| !b.is_empty())?;
+    // MS-SHLLINK 2.3 appends CommonPathSuffix to LocalBasePath verbatim.
+    // A network share name, unlike LocalBasePath, needs a separator before a relative suffix.
+    if info_flags & 0x01 != 0 {
+        return Some(format!("{base}{suffix}"));
+    }
     Some(if suffix.is_empty() {
         base
-    } else if base.ends_with('\\') {
+    } else if base.ends_with('\\') || suffix.starts_with('\\') {
         format!("{base}{suffix}")
     } else {
         format!("{base}\\{suffix}")
@@ -448,6 +463,30 @@ mod tests {
             let _ = app_user_model_id(&apps);
             let _ = item_list(&apps);
         }
+    }
+
+    #[test]
+    fn truncated_shortcut_headers_are_rejected() {
+        let mut header = vec![0x4c, 0, 0, 0];
+        header.extend_from_slice(&LINK_CLSID);
+        assert!(link(&header).is_err());
+    }
+
+    #[test]
+    fn link_info_concatenates_local_path_and_rejects_header_offsets() {
+        let mut info = vec![0u8; 0x1c];
+        info[4] = 0x1c;
+        info[8] = 1;
+        info[0x10] = 0x1c;
+        info.extend_from_slice(b"C:\\Tools\0");
+        info[0x18] = u8::try_from(info.len()).unwrap_or(0);
+        info.extend_from_slice(b"\\agent.exe\0");
+        assert_eq!(
+            link_info_path(&info).as_deref(),
+            Some(r"C:\Tools\agent.exe")
+        );
+        info[0x10] = 4; // points into LinkInfoHeaderSize, not string data
+        assert_eq!(link_info_path(&info), None);
     }
 
     #[test]
