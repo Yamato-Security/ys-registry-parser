@@ -1,5 +1,5 @@
 //! The `NTUSER.DAT` of regipy's test data (MIT; `tests/fixtures/regipy/`): its recent documents
-//! and profile, MuiCache, Explorer use counts, recent apps and pins.
+//! and profile, `MuiCache`, Explorer use counts, recent apps and pins.
 //! The items, their order and their shortcuts' names are those a reader built on
 //! yarp and libfwsi gives for the same hive (and for 8 other public `NTUSER.DAT` hives).
 #![allow(clippy::unwrap_used)]
