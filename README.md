@@ -83,6 +83,20 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   COM handler (class id, data), e-mail and message box action, as far as the bytes go;
   `dynamic_info` decodes `DynamicInfo` (last registered, last run, state, last result, last
   successful run). `profile_list` gives each profile's SID and folder from `ProfileList`.
+- `BCD` hives (`bcd`): the boot manager, its boot entries and the settings objects they inherit
+  (`bcd`, one `BcdObject` per key under `Objects`): the object's type (`Description\Type`,
+  named by `object_type_name`: `Windows boot manager`, `Windows boot loader`, `inherited
+  settings for Windows boot loader`, …), description, application path and device (the
+  partition and disk GUIDs of a GPT partition, or the device options object, as far as
+  `device_summary` understands; the bytes are kept), whether it is the Windows boot manager's
+  default entry and its place in the display order; and its elements (`Elements\<type>`), each
+  decoded by its type's format (device, string, object, object list, integer, boolean, integer
+  list), named by Microsoft's element types for the object's kind (`element_name`), with its
+  key's last-write time. The settings that matter after a compromise are given with inheritance
+  resolved (own, else from the objects in `InheritedObjects`, depth first) and where they come
+  from: `recoveryenabled`, `testsigning`, `nointegritychecks`, `safeboot` and
+  `bootstatuspolicy` (`boot_status_policy_name`, `safe_boot_name`). Undocumented element types,
+  and data that doesn't fit the format, keep their bytes.
 - `SAM` hives (`sam`): the local accounts (`accounts`), each from its key under
   `SAM\Domains\Account\Users`: `F` (`user_f`: last logon, password last set, account expiry,
   last failed logon, RID, account control flags, country code, code page, failed and total logon
@@ -184,6 +198,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
 - Deleted keys and values on 7 hives: the same deleted keys as yarp's scanner finds in free cells,
   and the same values; their data differs where a value's data cell is in use again (reported
   here, its bytes not taken for the deleted value's).
+- `BCD` stores on 5 public hives (regipy's, the DFIR Artifact Museum's `BCD` and its Windows 10,
+  11 and Server 2012 R2 `BCD-Template`s; 74 objects, 388 elements): every object type and every
+  element's value the same as dissect.regf's raw data decoded by the element's format; the same
+  description, path and partition and disk GUIDs as regipy's `boot_entry_list` for the 7 boot
+  entries on GPT partitions (regipy also reads 3 entries whose device is a ramdisk or the boot
+  device at those offsets, which give no partition).
 - Services on regipy's Windows 7 `SYSTEM` (both control sets, 933 services) and on the DFIR
   Artifact Museum's dirty Windows 11 `SYSTEM` with its logs (718): every value read and every
   `FailureActions` decoded the same as by a reader built on yarp.
@@ -220,7 +240,10 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
-  and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
+  and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `BCD` (objects, elements, the default
+  entry, devices) and a store built with recovery off, failures ignored, integrity checks off,
+  test signing inherited through two objects that inherit each other, safe mode, and elements
+  that don't decode; regipy's `SYSTEM`
   (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile,
   UserAssist, and its dirty `NTUSER.DAT` with the items its logs add); UserAssist built with both
   versions, a value of another size, a version that disagrees with the key's, an unknown GUID,

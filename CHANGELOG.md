@@ -52,3 +52,9 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `bcd`: the objects of `BCD` hives (`bcd`, `BcdObject`, `BcdElement`, `BcdValue`): each
+  object's type, description, path, device, whether it is the default entry, and its elements
+  decoded by their format and named by Microsoft's element types (`element_name`,
+  `object_type_name`, `device_summary`); `recoveryenabled`, `testsigning`, `nointegritychecks`,
+  `safeboot` and `bootstatuspolicy`, own or inherited (`boot_status_policy_name`,
+  `safe_boot_name`). (@YamatoSecurity)

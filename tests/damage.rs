@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::bcd::{bcd, device_summary};
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
@@ -59,6 +60,7 @@ fn read_all(data: Vec<u8>) {
         }
     }
     let _ = hive.deleted();
+    let _ = bcd(&hive);
     let sets = ControlSets::read(&hive);
     let _ = computer_name(&hive);
     for set in sets.present {
@@ -95,6 +97,12 @@ proptest! {
     #[test]
     fn a_damaged_hive(flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)) {
         read_all(damage(fixture("SAM"), flips));
+    }
+
+    /// The BCD store's objects and elements damaged: read without a panic.
+    #[test]
+    fn a_damaged_bcd_store(flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)) {
+        read_all(damage(fixture("BCD"), flips));
     }
 }
 
@@ -138,5 +146,6 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = (device_summary(&rest), device_summary(&bytes));
     }
 }
