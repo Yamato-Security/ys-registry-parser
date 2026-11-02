@@ -41,8 +41,8 @@ pub enum SecretKind {
     CachedLogonKey,
     /// `L$_SQSA_<SID>`: a local account's security questions (Windows 10 and later).
     SecurityQuestions,
-    /// `RasDialParams…`, `L$_RasDefaultCredentials…`, `L$_RasUserCredentials…`: dial-up and VPN
-    /// credentials.
+    /// `RasDialParams…` (`RasDialParms…`), `RasCredentials…`, `L$_RasDefaultCredentials…`,
+    /// `L$_RasUserCredentials…`: dial-up and VPN credentials.
     RasCredentials,
     /// Another `L$` name: a local secret.
     Local,
@@ -98,7 +98,10 @@ pub fn secret_kind(name: &str) -> (SecretKind, Option<String>, Option<String>) {
         (SecretKind::CachedLogonKey, None, None)
     } else if starts(name, "L$_SQSA_") {
         (SecretKind::SecurityQuestions, None, after("L$_SQSA_"))
-    } else if starts(name, "RasDialParams") || starts(name, "L$_Ras") {
+    } else if ["RasDialParams", "RasDialParms", "RasCredentials", "L$_Ras"]
+        .iter()
+        .any(|prefix| starts(name, prefix))
+    {
         // RasDialParams!<SID>#<n>
         let sid = name
             .split_once('!')
@@ -365,6 +368,15 @@ mod tests {
             kind("L$_RasDefaultCredentials#0"),
             ("ras_credentials", None, None)
         );
+        assert_eq!(
+            kind("RasDialParms!S-1-5-21-1-2-3-1001#0"),
+            (
+                "ras_credentials",
+                None,
+                Some("S-1-5-21-1-2-3-1001".to_owned())
+            )
+        );
+        assert_eq!(kind("RasCredentials!x"), ("ras_credentials", None, None));
         assert_eq!(kind("L$HYDRAENCKEY_28ada6da"), ("local", None, None));
         assert_eq!(kind("G$BCKUPKEY_PREFERRED"), ("global", None, None));
         assert_eq!(kind("M$Example"), ("machine", None, None));
