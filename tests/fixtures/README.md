@@ -7,6 +7,8 @@
 | `regipy/UsrClass.dat.gz`, `UsrClass.dat.LOG1.gz`, `UsrClass.dat.LOG2.gz` | the same: a dirty `UsrClass.dat` and its new-format logs | MIT, `regipy/LICENSE` |
 | `regipy/NTUSER-WSL.DAT.gz` | the same: `NTUSER-WSL.DAT.xz`, a Windows 10 `NTUSER.DAT` with three WSL distributions, App Paths and a user's `Uninstall` entry | MIT, `regipy/LICENSE` |
 | `regipy/SYSTEM.gz` | the same: `SYSTEM.xz`, a 32-bit Windows 7 `SYSTEM` hive with two control sets (`Select\Current` 1, `LastKnownGood` 2) | MIT, `regipy/LICENSE` |
+| `notatin/win7_ntuser.dat.gz` | [notatin](https://github.com/strozfriedberg/notatin) `test_data/win7_ntuser.dat` (ae3a706), compressed with gzip: a clean Windows 7 `NTUSER.DAT` with Remote Desktop, PuTTY, WinSCP, mapped drive and `MountPoints2` keys | Apache-2.0, `notatin/LICENSE` |
+| `host_keys.tsv` | Generated for these tests: SSH host keys of every type PuTTY keeps, in `SshHostKeys` form, with the fingerprints OpenSSH's `ssh-keygen -l` gives (DSA and Ed448: the SHA-256 of pycryptodome's encoding) | Test data of this repository |
 | `plaso/NTUSER.DAT.gz` | [Plaso](https://github.com/log2timeline/plaso) `test_data/regf/NTUSER.DAT` (ee5a0ab), compressed with gzip: a clean `NTUSER.DAT` with the common dialogs' `OpenSavePidlMRU`, `LastVisitedPidlMRU`, `CIDSizeMRU` and `FirstFolder`, and `TypedURLs` with `TypedURLsTime` | Apache-2.0, `plaso/LICENSE` |
 | `regipy/SYSTEM_WIN_10_1709.gz` | the same: `SYSTEM_WIN_10_1709.xz`, a Windows 10 `SYSTEM` hive whose BAM keys are in both layouts (`bam\UserSettings` and `bam\State\UserSettings`) | MIT, `regipy/LICENSE` |
 

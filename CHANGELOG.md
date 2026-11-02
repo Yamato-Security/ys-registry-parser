@@ -100,3 +100,13 @@ First version. (@YamatoSecurity)
   `Windows Portable Devices` (`portable_devices`) and ReadyBoost's `EMDMgmt` (`ready_boost`);
   from `NTUSER.DAT`, `MountPoints2` (`mount_points`); `history` joins them into one record per
   device and volume, with the users who had it. (@YamatoSecurity)
+- `remote_access`: the remote connections a user made, from `NTUSER.DAT` (`connections`,
+  `Connection`, `Kind`, `Client`): Remote Desktop's `Terminal Server Client` (`Default` MRU,
+  `Servers` with `UsernameHint` and `CertHash`, `LocalDevices`), PuTTY's and WinSCP's saved
+  sessions and accepted SSH host keys with their OpenSSH SHA-256 fingerprints
+  (`host_key_fingerprint`, `host_key_blob`, `host_key_name`), whether a session stores a password
+  (never decoded), PuTTY's recent sessions, mapped drives (`Network`, `Map Network Drive MRU` with
+  `mru_list`) and `MountPoints2` shares (`mount_point_share`); `rdp_target` and `unescape`.
+  (@YamatoSecurity)
+
+- Remote-access MRU matching follows registry Unicode case comparisons, and stored password presence is checked without exposing malformed password bytes in diagnostic output. (@YamatoSecurity)

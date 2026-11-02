@@ -10,6 +10,7 @@ use ys_registry_parser::ntuser::{
     classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
 };
 use ys_registry_parser::persistence::{self, Autostart, MachineClasses, Mechanism};
+use ys_registry_parser::remote_access::connections;
 use ys_registry_parser::sam::{accounts, machine_sid};
 use ys_registry_parser::shellbags::shell_bags;
 use ys_registry_parser::software::{TaskAction, profile_list, task_cache};
@@ -3422,4 +3423,301 @@ fn mru_lists_that_dont_add_up() {
         )]
     );
     assert_eq!(entries[0].problems, ["MRUList doesn't list it"]);
+}
+
+/// A generated Ed25519 host key in `SshHostKeys` form, and its fingerprint (`ssh-keygen -l`).
+const ED25519: &str = "0x1dc1835f6c2412ce0471e8e93f9bc28c107b658a7c09d1b77cf8328a9727bcbf,0x6a13e584ed673b1b8640774399fbb872c00e7ff64f4e24ea5870315b315b7fd3";
+const ED25519_FINGERPRINT: &str = "SHA256:FHMF6w9trn7uMSI+bN+z7+Biyw+8SJgBfXa9ie8UtuY";
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn remote_connections_of_each_kind() {
+    let tsc = r"Software\Microsoft\Terminal Server Client";
+    let default = format!(r"{tsc}\Default");
+    let server = format!(r"{tsc}\Servers\server01.example.com");
+    let bad_server = format!(r"{tsc}\Servers\10.0.0.5");
+    let devices = format!(r"{tsc}\LocalDevices");
+    let putty = r"Software\SimonTatham\PuTTY";
+    let web = format!(r"{putty}\Sessions\web%20server");
+    let template = format!(r"{putty}\Sessions\Default%20Settings");
+    let putty_keys = format!(r"{putty}\SshHostKeys");
+    let winscp = r"Software\Martin Prikryl\WinSCP 2";
+    let files = format!(r"{winscp}\Sessions\alice@files.example.com");
+    let mru = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Map Network Drive MRU";
+    let points = r"Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2";
+    let mut t = Tree::default();
+    t.sz(&default, "MRU1", "[fe80::1]:3390")
+        .sz(&default, "MRU0", "server01.example.com")
+        // damaged: binary; its bytes kept
+        .set(&default, "MRU2", 3, &[1, 2, 3])
+        .sz(&default, "MRU10", "10.0.0.9:3389")
+        .sz(&default, "MRU01", "not an MRU value")
+        .sz(&server, "UsernameHint", r"EXAMPLE\alice")
+        .set(&server, "CertHash", 3, &[0xab; 20])
+        .dword(&bad_server, "UsernameHint", 7)
+        .dword(&devices, "server01.example.com", 0x4c)
+        // PuTTY: the account in HostName, a proxy with its password, logging off
+        .sz(&web, "HostName", "admin@203.0.113.10")
+        .dword(&web, "PortNumber", 2222)
+        .sz(&web, "Protocol", "ssh")
+        .sz(&web, "UserName", "")
+        .sz(&web, "PublicKeyFile", r"C:\Users\alice\.ssh\id.ppk")
+        .sz(&web, "PortForwardings", "L8080=127.0.0.1:80")
+        .dword(&web, "ProxyMethod", 3)
+        .sz(&web, "ProxyHost", "proxy.example.com")
+        .dword(&web, "ProxyPort", 8080)
+        .sz(&web, "ProxyPassword", "not decoded")
+        .dword(&web, "LogType", 0)
+        .sz(&web, "LogFileName", "putty.log")
+        .sz(&template, "HostName", "")
+        .sz(&template, "ProxyHost", "proxy")
+        .multi(
+            &format!(r"{putty}\Jumplist"),
+            "Recent sessions",
+            &["gone", "web server"],
+        )
+        .sz(&putty_keys, "ssh-ed25519@22:203.0.113.10", ED25519)
+        .sz(&putty_keys, "rsa2@22:203.0.113.11", "0x23,0xzz")
+        .sz(&putty_keys, "not-a-host-key", "0x1")
+        // WinSCP: FTP over explicit TLS through an SSH tunnel, with a stored password
+        .sz(&files, "HostName", "files.example.com")
+        .dword(&files, "PortNumber", 21)
+        .sz(&files, "UserName", "alice")
+        .dword(&files, "FSProtocol", 5)
+        .dword(&files, "Ftps", 3)
+        .sz(&files, "Password", "A35C4E")
+        .sz(&files, "LocalDirectory", "C:%5CUsers%5Calice")
+        .sz(&files, "TunnelHostName", "jump.example.com")
+        .sz(&files, "TunnelPasswordPlain", "")
+        .sz(
+            &format!(r"{winscp}\SshHostKeys"),
+            "ssh-ed25519@22:files.example.com",
+            ED25519,
+        )
+        // drives: one with the user's own account, one with another
+        .sz(r"Network\Z", "RemotePath", r"\\fs01\share")
+        .dword(r"Network\Z", "UserName", 0)
+        .sz(r"Network\Z", "ProviderName", "Microsoft Windows Network")
+        .dword(r"Network\Z", "ProviderType", 0x20000)
+        .dword(r"Network\Z", "ConnectionType", 1)
+        .sz(r"Network\Y", "RemotePath", r"\\fs02\c$")
+        .sz(r"Network\Y", "UserName", r"EXAMPLE\admin")
+        // a letter listed twice, one not there, a value not listed
+        .sz(mru, "MRUList", "bdab")
+        .sz(mru, "a", r"\\fs01\share")
+        .sz(mru, "b", r"\\fs02\c$")
+        .sz(mru, "c", r"\\fs03\old")
+        .sz(&format!(r"{points}\##fs01#share"), "_LabelFromReg", "Team")
+        .sz(
+            &format!(r"{points}\##live.sysinternals.com#DavWWWRoot"),
+            "_LabelFromDesktopINI",
+            "",
+        )
+        .at(&format!(
+            r"{points}\{{0a1b2c3d-0000-0000-0000-100000000000}}"
+        ))
+        .at(&format!(r"{points}\C"));
+    let hive = t.hive("ROOT");
+    let (records, problems) = connections(&hive);
+    assert_eq!(
+        problems,
+        [
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Map Network Drive MRU: MRUList: b is listed twice"
+        ]
+    );
+    let got: Vec<String> = records
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {} {} {} {} {} {} {}",
+                c.kind.name(),
+                c.target.as_deref().unwrap_or("-"),
+                c.port.map_or("-".to_owned(), |p| p.to_string()),
+                c.username.as_deref().unwrap_or("-"),
+                c.protocol.as_deref().unwrap_or("-"),
+                c.mru_position.map_or("-".to_owned(), |p| p.to_string()),
+                c.session_name.as_deref().unwrap_or("-"),
+                c.password_stored
+                    .map_or("-", |p| if p { "password" } else { "none" }),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            "rdp_mru server01.example.com - - - 0 - -",
+            "rdp_mru fe80::1 3390 - - 1 - -",
+            "rdp_mru - - - - 2 - -",
+            "rdp_mru 10.0.0.9 3389 - - 10 - -",
+            r"rdp_server server01.example.com - EXAMPLE\alice - - - -",
+            "rdp_server 10.0.0.5 - - - - - -",
+            "rdp_local_devices server01.example.com - - - - - -",
+            "putty_session 203.0.113.10 2222 admin ssh 1 web server password",
+            "putty_session - - - - - Default Settings none",
+            "putty_session - - - - 0 gone -",
+            "putty_host_key 203.0.113.10 22 - - - - -",
+            "putty_host_key 203.0.113.11 22 - - - - -",
+            "putty_host_key - - - - - - -",
+            "winscp_session files.example.com 21 alice ftp - alice@files.example.com password",
+            "winscp_host_key files.example.com 22 - - - - -",
+            r"network_drive \\fs01\share - - Microsoft Windows Network - - -",
+            r"network_drive \\fs02\c$ - EXAMPLE\admin - - - -",
+            r"map_network_drive_mru \\fs02\c$ - - - 0 - -",
+            "map_network_drive_mru - - - - 1 - -",
+            r"map_network_drive_mru \\fs01\share - - - 2 - -",
+            r"map_network_drive_mru \\fs03\old - - - - - -",
+            r"mount_point \\fs01\share - - - - - -",
+            r"mount_point \\live.sysinternals.com\DavWWWRoot - - - - - -",
+        ]
+    );
+    let detail = |at: usize| -> Vec<String> {
+        records[at]
+            .details
+            .iter()
+            .map(|(n, v)| format!("{n}={v}"))
+            .collect()
+    };
+    // the damaged MRU value keeps its bytes
+    assert_eq!(records[2].problems, ["is REG_BINARY, not a string"]);
+    assert_eq!(records[2].data_raw.as_deref(), Some(&[1u8, 2, 3][..]));
+    assert_eq!(records[2].value_name.as_deref(), Some("MRU2"));
+    assert_eq!(detail(4), ["CertHash=".to_owned() + &"ab".repeat(20)]);
+    assert_eq!(
+        records[5].problems,
+        ["UsernameHint: is REG_DWORD, not a string; its data: 07000000"]
+    );
+    assert_eq!(detail(6), ["LocalDevices=0x4c"]);
+    assert_eq!(
+        detail(7),
+        [
+            r"PublicKeyFile=C:\Users\alice\.ssh\id.ppk",
+            "PortForwardings=L8080=127.0.0.1:80",
+            "ProxyMethod=3 (http)",
+            "ProxyHost=proxy.example.com",
+            "ProxyPort=8080",
+            "StoredPasswords=ProxyPassword",
+        ]
+    );
+    assert_eq!(
+        records[7].key_path,
+        format!(r"{putty}\Sessions\web%20server")
+    );
+    // the template's unused proxy host isn't reported
+    assert_eq!(detail(8), Vec::<String>::new());
+    assert_eq!(
+        (
+            records[9].key_path.as_str(),
+            records[9].value_name.as_deref()
+        ),
+        (
+            r"Software\SimonTatham\PuTTY\Jumplist",
+            Some("Recent sessions")
+        )
+    );
+    // host keys: a fingerprint, numbers that aren't hex, a name that isn't type@port:host
+    assert_eq!(
+        (
+            records[10].host_key_type.as_deref(),
+            records[10].host_key_fingerprint.as_deref(),
+            records[10].host_key.as_deref()
+        ),
+        (
+            Some("ssh-ed25519"),
+            Some(ED25519_FINGERPRINT),
+            Some(ED25519)
+        )
+    );
+    assert_eq!(records[11].problems, [r#""0xzz" is not a number in hex"#]);
+    assert_eq!(
+        (
+            records[11].host_key_fingerprint.as_deref(),
+            records[11].host_key.as_deref()
+        ),
+        (None, Some("0x23,0xzz"))
+    );
+    assert_eq!(
+        records[12].problems,
+        ["its name isn't <type>@<port>:<host>"]
+    );
+    assert_eq!(records[12].value_name.as_deref(), Some("not-a-host-key"));
+    assert_eq!(
+        detail(13),
+        [
+            "Ftps=3 (explicit TLS)",
+            r"LocalDirectory=C:\Users\alice",
+            "TunnelHostName=jump.example.com",
+            "StoredPasswords=Password",
+        ]
+    );
+    assert_eq!(
+        records[14].host_key_fingerprint.as_deref(),
+        Some(ED25519_FINGERPRINT)
+    );
+    assert_eq!(records[15].drive_letter.as_deref(), Some("Z"));
+    assert_eq!(
+        detail(15),
+        ["ConnectionType=1 (disk)", "ProviderType=0x20000"]
+    );
+    assert_eq!(records[17].value_name.as_deref(), Some("b"));
+    assert_eq!(
+        records[18].problems,
+        ["MRUList lists value d, which is not there"]
+    );
+    assert_eq!(records[20].problems, ["MRUList doesn't list it"]);
+    assert_eq!(detail(21), ["Label=Team"]);
+    for (at, record) in records.iter().enumerate() {
+        if ![2, 5, 11, 12, 18, 20].contains(&at) {
+            assert_eq!(record.problems, Vec::<String>::new(), "{at}");
+        }
+    }
+    assert!(
+        records
+            .iter()
+            .all(|r| r.key_last_written == WHEN && !r.replayed)
+    );
+    // a hive without any of these keys
+    assert_eq!(
+        connections(&Tree::default().hive("ROOT")),
+        (Vec::new(), Vec::new())
+    );
+}
+
+#[test]
+fn remote_map_mru_matches_registry_value_case() {
+    use ys_registry_parser::remote_access::{MAP_NETWORK_DRIVE_MRU, connections};
+    let mut t = Tree::default();
+    t.sz(MAP_NETWORK_DRIVE_MRU, "MRUList", "A")
+        .sz(MAP_NETWORK_DRIVE_MRU, "a", r"\\server\share");
+    let (records, problems) = connections(&t.hive("ROOT"));
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].target.as_deref(), Some(r"\\server\share"));
+    assert_eq!(records[0].mru_position, Some(0));
+}
+
+#[test]
+fn remote_stored_passwords_never_leak_through_malformed_value_diagnostics() {
+    use ys_registry_parser::remote_access::{PUTTY, WINSCP, connections};
+    let mut t = Tree::default();
+    let canary = b"secret-canary-do-not-export";
+    t.set(
+        &format!(r"{PUTTY}\Sessions\test"),
+        "ProxyPassword",
+        3,
+        canary,
+    )
+    .set(&format!(r"{WINSCP}\Sessions\test"), "Password", 3, canary);
+    let (records, problems) = connections(&t.hive("ROOT"));
+    assert!(problems.is_empty(), "{problems:?}");
+    let text = format!("{records:?}");
+    let hex = canary.iter().fold(String::new(), |mut out, b| {
+        use std::fmt::Write;
+        write!(out, "{b:02x}").unwrap();
+        out
+    });
+    assert!(
+        !text.contains("secret-canary") && !text.contains(&hex),
+        "{text}"
+    );
+    assert!(records.iter().all(|r| r.password_stored == Some(true)));
 }

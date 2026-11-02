@@ -80,6 +80,26 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+- The remote connections a user made (`remote_access`, from `NTUSER.DAT`): `connections` gives
+  one `Connection` per computer, session, host key, mapped drive or share, with its `Kind` and
+  `Client` (`rdp`, `putty`, `winscp`, `mapped_drive`, `network_share`), target, port, account,
+  protocol, place in its list, and what else its key says (`details`):
+  - Remote Desktop: `Terminal Server Client\Default`'s `MRU0`… (`host` or `host:port`,
+    `rdp_target`), a `Servers\<host>` key per computer signed in to (`UsernameHint`, the
+    accepted certificate's `CertHash`), and `LocalDevices`;
+  - PuTTY: each saved session (`HostName`, with `user@`; `PortNumber`, `UserName`, `Protocol`,
+    the key file, proxy, port forwardings and remote command; its name unescaped, `unescape`),
+    its place in `Jumplist`'s `Recent sessions` (and the names only that list has), and each
+    accepted SSH host key of `SshHostKeys` (`host_key_name`: type, port and host) with its
+    OpenSSH fingerprint (`host_key_fingerprint`, `SHA256:…`, from the key's SSH encoding,
+    `host_key_blob`: `rsa2`, `dss`, ECDSA on the three NIST curves, Ed25519 and Ed448);
+  - WinSCP: each saved session (host, port, user, `FSProtocol` named, `Ftps`, directories, key
+    file, SSH tunnel, proxy; whether a password is stored, never decoded) and its host keys;
+  - mapped drives: `Network\<letter>` (`RemotePath`, `UserName`, `ProviderName`) and `Map
+    Network Drive MRU` in the order of its `MRUList` (`mru_list`), with letters it lists that
+    aren't there and values it doesn't list;
+  - shares: `MountPoints2`'s `##server#share` keys (`mount_point_share`), with their labels.
+  A value that isn't of its type is a problem, with its bytes.
   `mui_cache` gives the programs a user ran with the names Windows read from their version
   resources (`MuiCache`), from `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell\MuiCache`,
   Windows Vista and later) and `NTUSER.DAT` (`Software\Microsoft\Windows\ShellNoRoam\MUICache`,
@@ -269,6 +289,18 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- Remote connections on 27 public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's, artemis' and
+  the DFIR Artifact Museum's, Windows XP to 11): the same Remote Desktop servers, accounts and
+  times (11), PuTTY sessions (1) and host keys (5), WinSCP sessions (4) and mapped drives (9) as
+  regipy's `terminal_services_history`, `putty`, `winscp_saved_sessions` and
+  `network_drives_plugin`; the same `Default` MRU lists (10 computers), `LocalDevices`, mapped
+  drives, `MountPoints2` shares (16) and *Map Network Drive* lists (9 paths) as Plaso's
+  `mstsc_rdp`, `mstsc_rdp_mru`, `network_drives`, `explorer_mountpoints2` and `mrulist_string`,
+  to the 100 ns. Plaso also lists the redirected printers under `Default\AddIns\RDPDR` as
+  servers; they aren't. The host keys' fingerprints (6, PuTTY's and WinSCP's) are the SHA-256
+  digests dissect's `putty` gives; 16 generated keys of every type have the fingerprints OpenSSH's
+  `ssh-keygen -l` gives (DSA and Ed448, which it no longer reads: the SHA-256 of pycryptodome's
+  encoding).
 - The common dialogs' lists on the 9 public `NTUSER.DAT` hives with them (regipy's, Plaso's,
   notatin's and the DFIR Artifact Museum's, Windows XP to 10; 1,398 entries in all 7 lists): the
   same entries in the same order, with the same programs and paths, as Plaso's `mrulist` and
@@ -367,6 +399,8 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   and `Lxss` keys that aren't distributions; random damage, and random `Actions`, `F` and `V`.
   Common-dialog tests also cover Plaso's NTUSER.DAT, missing or unlisted values, truncated
   shell item lists and strings, incorrect registry types, and repeated MRUList entries.
+  Remote-access tests include notatin's Windows 7 hive, stored-session metadata, SSH
+  fingerprints and malformed records, with passwords omitted.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose
@@ -378,4 +412,5 @@ Apache-2.0 (`LICENSE`). The transaction log replay comes from Yamato Security's
 [ys-shimcache-parser](https://github.com/Yamato-Security/ys-shimcache-parser) (Apache-2.0). The
 format is Maxim Suhanov's [Windows registry file format specification](https://github.com/msuhanov/regf)
 (CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`),
-and Plaso's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`).
+and Plaso's and notatin's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`,
+`tests/fixtures/notatin/LICENSE`).
