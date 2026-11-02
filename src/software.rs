@@ -176,7 +176,7 @@ impl Reader<'_> {
 }
 
 /// A GUID's 16 bytes as `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`.
-fn guid(b: &[u8]) -> String {
+pub(crate) fn guid(b: &[u8]) -> String {
     let d1 = u32_at(b, 0).unwrap_or(0);
     let d2 = u16_at(b, 4).unwrap_or(0);
     let d3 = u16_at(b, 6).unwrap_or(0);

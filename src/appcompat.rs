@@ -26,6 +26,7 @@ use crate::bytes::{u16_at, u32_at, utf16_units};
 use crate::data::ValueType;
 use crate::hive::{Hive, Key, Status, Value};
 use crate::system::{number, string};
+use std::collections::HashSet;
 
 /// Where the compatibility data is, under `SOFTWARE`'s root and `NTUSER.DAT`'s `Software`.
 const APP_COMPAT_FLAGS: &str = r"Microsoft\Windows NT\CurrentVersion\AppCompatFlags";
@@ -33,6 +34,8 @@ const APP_COMPAT_FLAGS: &str = r"Microsoft\Windows NT\CurrentVersion\AppCompatFl
 const CIT_MODULE_SETTINGS: [&str; 2] = ["OverflowQuota", "OverflowValue"];
 /// The prefix of a Program Compatibility Assistant value name of a program on removable media.
 const SIGN_MEDIA: &str = "SIGN.MEDIA=";
+/// Bound decompression of untrusted CIT values; larger records retain their bytes and a diagnostic.
+const MAX_CIT_DATABASE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Where an [`AppCompatEntry`] comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -164,7 +167,16 @@ impl AppCompatEntry {
             )),
         };
         match time {
-            Ok(t) => Some(t),
+            Ok(0) => None,
+            Ok(t) if crate::data::filetime(t).is_some() => Some(t),
+            Ok(t) => {
+                self.problems.push(format!(
+                    "{}: FILETIME 0x{t:016x} is past 9999",
+                    value.name()
+                ));
+                self.data_raw = Some(bytes);
+                None
+            }
             Err(why) => {
                 self.problems.push(format!("{}: {why}", value.name()));
                 self.data_raw = Some(bytes);
@@ -177,6 +189,13 @@ impl AppCompatEntry {
     fn text(&mut self, value: &Value) -> Option<String> {
         self.replayed |= value.status() == Status::Replayed;
         let (text, why) = string(value);
+        let why = why.or_else(|| {
+            (!matches!(
+                value.value_type(),
+                ValueType::Sz | ValueType::ExpandSz | ValueType::Link
+            ))
+            .then(|| format!("is {}, not a string", value.value_type().name()))
+        });
         if let Some(why) = why {
             self.problems.push(format!("{}: {why}", value.name()));
             if self.data_raw.is_none() {
@@ -231,17 +250,20 @@ pub fn ntuser(hive: &Hive) -> (Vec<AppCompatEntry>, Vec<String>) {
             }
             let (bytes, why) = value.read_data();
             if source == AppCompatSource::PcaStore {
+                if value.value_type() != ValueType::Binary {
+                    entry
+                        .problems
+                        .push(format!("is {}, not REG_BINARY", value.value_type().name()));
+                }
                 if !bytes.starts_with(b"SACP") {
                     entry.problems.push(
                         "is not a SACP record (Program Compatibility Assistant data)".to_owned(),
                     );
                 }
-                entry.data_raw = Some(bytes).filter(|b| !b.is_empty());
-            } else if value.value_type() != ValueType::Dword {
-                entry
-                    .problems
-                    .push(format!("is {}, not REG_DWORD", value.value_type().name()));
-                entry.data_raw = Some(bytes).filter(|b| !b.is_empty());
+                entry.data_raw = Some(bytes);
+            } else if let Err(problem) = number(&value) {
+                entry.problems.push(problem);
+                entry.data_raw = Some(bytes);
             }
             entry.problems.extend(why);
             f.records.push(entry);
@@ -395,6 +417,11 @@ fn cit_database(bytes: &[u8]) -> Result<Vec<u8>, String> {
             bytes.len()
         ));
     };
+    if size as usize > MAX_CIT_DATABASE_SIZE {
+        return Err(format!(
+            "CIT database size {size} exceeds the {MAX_CIT_DATABASE_SIZE}-byte decompression limit"
+        ));
+    }
     let end = (compressed as usize).min(bytes.len());
     if (compressed as usize) < 8 || compressed as usize > bytes.len() {
         return Err(format!(
@@ -402,7 +429,8 @@ fn cit_database(bytes: &[u8]) -> Result<Vec<u8>, String> {
             bytes.len()
         ));
     }
-    let data = lznt1(&bytes[8..end], size as usize)?;
+    // One extra output byte distinguishes a valid size from silently truncated expansion.
+    let data = lznt1(&bytes[8..end], size as usize + 1)?;
     if data.len() == size as usize {
         Ok(data)
     } else {
@@ -419,17 +447,32 @@ fn cit_database(bytes: &[u8]) -> Result<Vec<u8>, String> {
 fn program_strings(data: &[u8]) -> Vec<String> {
     let units = utf16_units(data);
     let mut found: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     let mut i = 0;
     while i < units.len() {
-        let end = units[i..]
-            .iter()
-            .position(|&u| u < 0x20 || (0xd800..0xe000).contains(&u))
-            .map_or(units.len(), |n| i + n);
+        let mut end = i;
+        while end < units.len() {
+            let unit = units[end];
+            if unit < 0x20 || (0xdc00..0xe000).contains(&unit) {
+                break;
+            }
+            if (0xd800..0xdc00).contains(&unit) {
+                if !units
+                    .get(end + 1)
+                    .is_some_and(|u| (0xdc00..0xe000).contains(u))
+                {
+                    break;
+                }
+                end += 2;
+            } else {
+                end += 1;
+            }
+        }
         if end > i {
             let text = String::from_utf16_lossy(&units[i..end]);
             if let Some(start) = path_start(&text) {
                 let path = text[start..].to_owned();
-                if !found.contains(&path) {
+                if seen.insert(path.clone()) {
                     found.push(path);
                 }
             }
@@ -470,10 +513,13 @@ pub fn lznt1(data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
     let mut at = 0;
     while at < data.len() && out.len() < limit {
         let Some(header) = u16_at(data, at) else {
-            break;
+            return Err(format!("LZNT1 chunk header at {at} is cut short"));
         };
         if header == 0 {
             break;
+        }
+        if header & 0x7000 != 0x3000 {
+            return Err(format!("LZNT1 chunk at {at} has an invalid signature"));
         }
         let size = usize::from(header & 0x0fff) + 1;
         let chunk = data
@@ -498,6 +544,11 @@ pub fn lznt1(data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
                     return Ok(out);
                 }
                 if flags & (1 << bit) == 0 {
+                    if out.len() - start >= 4096 {
+                        return Err(format!(
+                            "LZNT1 chunk ending at {at} decompresses to more than 4096 bytes"
+                        ));
+                    }
                     out.push(chunk[i]);
                     i += 1;
                     continue;
@@ -539,7 +590,7 @@ pub fn lznt1(data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
 
 /// The installed shim databases and the programs they apply to, under `base`.
 fn shim_databases(f: &mut Found, base: &str, wow64: bool) {
-    let mut installed: Vec<(String, String)> = Vec::new();
+    let mut installed: Vec<(String, bool, Value<'_>)> = Vec::new();
     if let Some((list, at)) = f.key(&format!(r"{base}\InstalledSDB")) {
         for (key, key_at) in f.subkeys(&list, &at) {
             let values = f.values(&key, &key_at);
@@ -565,14 +616,28 @@ fn shim_databases(f: &mut Found, base: &str, wow64: bool) {
                             Ok(n) => entry
                                 .details
                                 .push(("DatabaseType".to_owned(), format!("0x{n:x}"))),
-                            Err(why) => entry.problems.push(format!("{name}: {why}")),
+                            Err(why) => {
+                                entry.problems.push(format!("{name}: {why}"));
+                                if entry.data_raw.is_none() {
+                                    entry.data_raw = Some(value.read_data().0);
+                                }
+                            }
                         }
                     }
                     _ => {}
                 }
             }
-            if let Some(path) = &entry.sdb_path {
-                installed.push((key.name().to_ascii_uppercase(), path.clone()));
+            if entry.sdb_path.is_some()
+                && let Some(value) = values
+                    .iter()
+                    .rev()
+                    .find(|v| v.name().eq_ignore_ascii_case("DatabasePath"))
+            {
+                installed.push((
+                    key.name().to_ascii_uppercase(),
+                    key.status() == Status::Replayed,
+                    *value,
+                ));
             }
             f.records.push(entry);
         }
@@ -597,10 +662,13 @@ fn shim_databases(f: &mut Found, base: &str, wow64: bool) {
                     .filter(|&n| name[n..].eq_ignore_ascii_case(".sdb"))
                     .map_or(name.as_str(), |n| &name[..n]);
                 entry.sdb_guid = Some(guid.to_owned()).filter(|g| !g.is_empty());
-                entry.sdb_path = installed
+                if let Some((_, replayed, value)) = installed
                     .iter()
-                    .find(|(g, _)| g.eq_ignore_ascii_case(guid))
-                    .map(|(_, p)| p.clone());
+                    .find(|(g, _, _)| g.eq_ignore_ascii_case(guid))
+                {
+                    entry.replayed |= *replayed;
+                    entry.sdb_path = entry.text(value);
+                }
                 if value.size() > 0 {
                     entry.sdb_installed = entry.time(&value);
                 }
@@ -623,6 +691,47 @@ mod tests {
             out.extend(chunk);
         }
         out
+    }
+
+    #[test]
+    fn malformed_lznt1_framing_is_rejected() {
+        assert!(lznt1(&[0x03, 0x00, b'a', b'b', b'c', b'd'], 100).is_err());
+        assert!(lznt1(&[0x12], 100).is_err());
+        let mut data = 0xb004u16.to_le_bytes().to_vec();
+        data.extend([0b10, b'A', 0xfc, 0x0f, b'B']);
+        assert!(lznt1(&data, 5000).is_err());
+    }
+
+    #[test]
+    fn cit_size_cannot_hide_extra_decompressed_data() {
+        let compressed = stored(b"abcdef");
+        let mut value = ((compressed.len() + 8) as u32).to_le_bytes().to_vec();
+        value.extend(3u32.to_le_bytes());
+        value.extend(compressed);
+        assert!(cit_database(&value).is_err());
+    }
+
+    #[test]
+    fn cit_expansion_is_bounded() {
+        let mut compressed = Vec::new();
+        for _ in 0..16385 {
+            compressed.extend([3, 0xb0, 2, b'A', 0xfc, 0x0f]);
+        }
+        let mut value = ((compressed.len() + 8) as u32).to_le_bytes().to_vec();
+        value.extend((16385u32 * 4096).to_le_bytes());
+        value.extend(compressed);
+        assert!(cit_database(&value).is_err());
+    }
+
+    #[test]
+    fn cit_paths_preserve_valid_surrogate_pairs() {
+        let path = r"C:\Users\例😀\program.exe";
+        let bytes: Vec<u8> = path
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(program_strings(&bytes), [path]);
     }
 
     #[test]

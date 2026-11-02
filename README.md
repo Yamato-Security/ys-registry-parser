@@ -57,6 +57,21 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `FailureActions` value (`SERVICE_FAILURE_ACTIONS`: reset period, whether a reboot message and a
   command are set, then each action and its delay); `start_name`, `type_names` and
   `error_control_name` name the numbers.
+- Most-recently-used lists in `NTUSER.DAT` (`mru`): `mru_lists` gives every entry of `RunMRU`
+  (lettered values in `MRUList` order, each command without its trailing `\1`), `TypedPaths`,
+  `WordWheelQuery` (UTF-16 search terms in `MRUListEx` order), Internet Explorer's `TypedURLs`
+  with each address's time from `TypedURLsTime`, Paint's and WordPad's `Recent File List`, and
+  Windows XP's `Search Assistant\ACMru` (a subkey per kind of search, `acmru_search`), in list
+  order (`url1`, `File1` and `000` are the most recent), with the key's last-write time (which
+  dates its most recent entry only). Values a list names but the key hasn't, values it doesn't
+  name, and data that doesn't decode (kept as its bytes) are reported.
+  `bam` gives when each user last ran each program as the Background and Desktop Activity
+  Moderators recorded it: every value of each user's key (named after the user's SID) under
+  `Services\bam` and `Services\dam`, in both layouts (`State\UserSettings`, Windows 10 1809 and
+  later, and `UserSettings`, 1709 to 1803), without `Version` and `SequenceNumber`; the value's
+  name is the program (a `\Device\HarddiskVolumeN\…` path, which `device_path` splits into the
+  device and the path on it, or a packaged app's ID) and the first 8 bytes of its data are the
+  time it last ran. Data that isn't `REG_BINARY` or holds fewer than 8 bytes keeps its bytes.
 - `NTUSER.DAT` hives (`ntuser`): Explorer's recent documents (`recent_docs`), from `RecentDocs`
   and each of its subkeys (one per extension, and `Folder`): every item in the order of the key's
   `MRUListEx` (`mru_list_ex`), its name, and the name of its shortcut in the `Recent` folder (the
@@ -73,6 +88,71 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   bytes; with `NoEncrypt` set, each item says its name may not be ROT13.
   `user_assist_settings` reads what turns UserAssist off (`Start_TrackProgs`,
   `NoInstrumentation`, `NoLog`) or writes names without ROT13 (`NoEncrypt`).
+- Security settings (`security_settings`) in `SOFTWARE` (`software`), a `SYSTEM` control set
+  (`system`) and `NTUSER.DAT` (`ntuser`), one `Setting` per value found, with its `Area`
+  (`defender`, `uac`, `credentials`, `remote_access`, `network`, `powershell`, `evidence`), value,
+  what the value means, whether it weakens what current Windows does by default (`None` where
+  that doesn't apply), and whether it comes from a `Policies` key: Microsoft Defender
+  (`DisableAntiSpyware`, real-time protection, tamper protection, MAPS and samples, and each
+  exclusion of `Exclusions\Paths`, `Extensions`, `Processes`, `IpAddresses` and
+  `TemporaryPaths`, with their policy keys), UAC (`EnableLUA`, `ConsentPromptBehaviorAdmin`,
+  `LocalAccountTokenFilterPolicy`, `FilterAdministratorToken`), credentials (`WDigest`'s
+  `UseLogonCredential`, `Lsa`'s `RunAsPPL`, `LsaCfgFlags`, `DisableRestrictedAdmin`,
+  `LmCompatibilityLevel`), Remote Desktop (`fDenyTSConnections`, the port, Network Level
+  Authentication, and their policies), the firewall profiles' `EnableFirewall` (and policies) and
+  `SMB1`, PowerShell (execution policy, script block, module and transcription logging, each AMSI
+  provider with its DLL, the user's policies and Windows Script Host's `AmsiEnable`), and evidence
+  (`NtfsDisableLastAccessUpdate`, System Restore, each classic event log's `MaxSize`, and whether
+  25 event log channels that record attacks are on, with their sizes). A value of another type
+  keeps its bytes, and no meaning is guessed for it.
+- The remote connections a user made (`remote_access`, from `NTUSER.DAT`): `connections` gives
+  one `Connection` per computer, session, host key, mapped drive or share, with its `Kind` and
+  `Client` (`rdp`, `putty`, `winscp`, `mapped_drive`, `network_share`), target, port, account,
+  protocol, place in its list, and what else its key says (`details`):
+  - Remote Desktop: `Terminal Server Client\Default`'s `MRU0`… (`host` or `host:port`,
+    `rdp_target`), a `Servers\<host>` key per computer signed in to (`UsernameHint`, the
+    accepted certificate's `CertHash`), and `LocalDevices`;
+  - PuTTY: each saved session (`HostName`, with `user@`; `PortNumber`, `UserName`, `Protocol`,
+    the key file, proxy, port forwardings and remote command; its name unescaped, `unescape`),
+    its place in `Jumplist`'s `Recent sessions` (and the names only that list has), and each
+    accepted SSH host key of `SshHostKeys` (`host_key_name`: type, port and host) with its
+    OpenSSH fingerprint (`host_key_fingerprint`, `SHA256:…`, from the key's SSH encoding,
+    `host_key_blob`: `rsa2`, `dss`, ECDSA on the three NIST curves, Ed25519 and Ed448);
+  - WinSCP: each saved session (host, port, user, `FSProtocol` named, `Ftps`, directories, key
+    file, SSH tunnel, proxy; whether a password is stored, never decoded) and its host keys;
+  - mapped drives: `Network\<letter>` (`RemotePath`, `UserName`, `ProviderName`) and `Map
+    Network Drive MRU` in the order of its `MRUList` (`mru_list`), with letters it lists that
+    aren't there and values it doesn't list;
+  - shares: `MountPoints2`'s `##server#share` keys (`mount_point_share`), with their labels.
+  A value that isn't of its type is a problem, with its bytes.
+  `mui_cache` gives the programs a user ran with the names Windows read from their version
+  resources (`MuiCache`), from `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell\MuiCache`,
+  Windows Vista and later) and `NTUSER.DAT` (`Software\Microsoft\Windows\ShellNoRoam\MUICache`,
+  Windows XP): one entry per program, its `<path>.FriendlyAppName` and `<path>.ApplicationCompany`
+  values joined (Windows 8 and later), or its `<path>` value (Windows XP and 7), without `LangID`
+  and the resource strings the shell cached (`@shell32.dll,-22019`, counted). A value that isn't
+  text that decodes cleanly keeps its bytes. Case-insensitive joins do not expand characters:
+  `straße.exe` and `STRASSE.EXE` remain separate programs, while `café.exe` and `CAFÉ.EXE` join.
+- The Open and Save As dialogs' history in `NTUSER.DAT` (`comdlg32`): `dialogs` gives every
+  entry of `ComDlg32`'s `OpenSavePidlMRU` (a subkey per extension, and `*`), `LastVisitedPidlMRU`,
+  `LastVisitedPidlMRULegacy`, `CIDSizeMRU` and `FirstFolder`, and of Windows XP's `OpenSaveMRU`
+  and `LastVisitedMRU`, in the order of its key's `MRUListEx` (numbered values) or `MRUList`
+  (lettered values, a string of their letters), with the key's last-write time (which dates its
+  most recent entry only): the program that showed the dialog, a path stored as text, or the
+  shell item list (the file opened or saved, or the folder last used), kept as its bytes for a
+  shell item parser; `item_list_problem` checks a list's layout. Values the list names but the key
+  hasn't, values it doesn't name, and data that doesn't decode (kept as its bytes) are reported.
+- ShellBags (`shellbags`): the folders a user opened in Explorer, from the `BagMRU` trees of
+  `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell\BagMRU`, and the 32-bit
+  Explorer's under `Wow6432Node`) and `NTUSER.DAT` (`Software\Microsoft\Windows\Shell\BagMRU`,
+  and Windows XP's `ShellNoRoam\BagMRU`). `shell_bags` gives every item from the top of each tree
+  down, in `MRUListEx` order (an item, then the items under it): the item it is under, its place
+  in its parent's list, its subkey's `NodeSlot` (its `Bags\N` key) and last-write time, the
+  last-write time of the key its value is in (which dates the opening of the key's most recent
+  item only), and its shell item list's bytes, for a shell item parser to decode (a link's
+  target ID list has the same items). A listed value that isn't there, a value or subkey the
+  list doesn't name, and a subkey without its value (the items under it are still read) are
+  reported, and subkey lists that loop are read once.
 - `SOFTWARE` hives (`software`): the Task Scheduler's cache (`task_cache`), each task from its
   `Tree` entry (name and folders, `Id`, `Index`, whether its `SD` is there: without it the Task
   Scheduler doesn't show the task) and its `Tasks\{GUID}` key (`Path`, `URI`, `Author`, …), the
@@ -90,7 +170,51 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   logon script, profile path), the password hint, the Microsoft account it is linked to, and
   whether the sign-in screen hides it; its `Names` entry's RID and time (about when the account
   was made) are matched with it, and what disagrees is reported. `account_flag_names` names the
-  flags. Password hashes are not read.
+  flags. `machine_sid` gives the computer's SID (its local accounts' SIDs are it and their RIDs),
+  from the end of `SAM\Domains\Account`'s `V`. Password hashes are not read.
+- What a timeline needs to know about a system (`system_info`), from its four machine hives.
+  `system` reads a `SYSTEM` hive's control set in use: the computer's name (and when its key was
+  written), the TCP/IP host name and DNS domain, the time zone (`TimeZone`: its name, standard and
+  daylight names, the biases, `StandardStart` and `DaylightStart`, which are the kernel's
+  `TIME_FIELDS` with the weekday last, not `SYSTEMTIME`s, decoded by `TransitionDate` and said in
+  words by its `describe`), the last shutdown, the processor architecture and the ANSI and OEM code
+  pages; and the Windows versions it was upgraded from (`Setup\Source OS (Updated on …)`: the date
+  in the key's name and the version's values). `software` reads a `SOFTWARE` hive's
+  `CurrentVersion` (`WindowsVersion`: product name, edition, display version, release, version,
+  build and update build revision, service pack, install date and time, registered owner and
+  organization, `SystemRoot`), its profiles (`Profile`: SID, folder, key time, load and unload
+  times, state) and the user who last signed in (`LastLoggedOn`). `machine_sid` gives the
+  computer's SID from a `SAM` hive, and `domains` what LSA's policy in a `SECURITY` hive names: the
+  account domain (the computer's name and SID), the primary domain (the domain it is joined to, or
+  its workgroup) with its SID and when it was set, the domain's and forest's DNS names, the
+  domain's GUID and the computer account's SID. `sid` turns a binary SID into text and
+  `utc_offset` a bias into `UTC-05:00`. Values that don't decode are problems that keep their
+  bytes.
+- Explorer's use of applications in `NTUSER.DAT` hives (`ntuser`), one `AppUsage` per
+  application, button or item: `feature_usage`, the counts of `Explorer\FeatureUsage`'s
+  subkeys (`AppSwitched`, `AppLaunch`, `ShowJumpView`, `AppBadgeUpdated`, `TrayButtonClicked`)
+  per application user model ID, path or button, and `feature_usage_created`, its
+  `KeyCreationTime`; `recent_apps`, `Search\RecentApps` (Windows 10 up to 1709): each
+  application's `AppId`, `AppPath`, `LaunchCount` and `LastAccessedTime`, and the files it
+  opened (`RecentItems`: `DisplayName`, `Path`, `LastAccessedTime`); `taskband`, the programs
+  pinned to the taskbar: each item of `Taskband`'s `Favorites` as a shell item path
+  (`User Pinned\TaskBar\File Explorer.lnk`, or `Applications\<app ID>` for a packaged app)
+  with its application user model ID (`0xBEEF001D`, or a packaged app's property store) and how
+  it was pinned (`0xBEEF001E`), and each link of `FavoritesResolve` with the path its
+  `LinkInfo` (else its target ID list) gives; and `programs_cache`, each shell item list of
+  `StartPage` and `StartPage2`'s `ProgramsCache`, `ProgramsCacheSMP` and `ProgramsCacheTBP`
+  (format versions 1, 9, 12 and 19). A count or time of another type, a list item that isn't
+  understood and a link that isn't one keep their bytes.
+- Microsoft Office in `NTUSER.DAT` (`office`): `office` gives, for each version (`16.0`, …) and
+  application, the documents and folders it opened last (`File MRU`, `Place MRU`, and each
+  Microsoft 365 account's `User MRU` lists; `mru_item` decodes an item's `[F…][T…][O…]*path`
+  into its flags, last-opened time and path), the documents whose editing or macros the user
+  enabled (`Security\Trusted Documents\TrustRecords`; `trust_record`: the time it was trusted
+  and the flags, `MACROS_ENABLED` when its macros were), the macro settings `VBAWarnings`,
+  `BlockContentExecutionFromInternet` and `AccessVBOM` (`setting_meaning` says what each number
+  means), and `Security\Trusted Locations` (its values, and each location's `Path` and other
+  values), the user's and those set by policy (`Software\Policies\Microsoft\Office`). Data that
+  doesn't decode keeps its bytes.
 - Autostart locations (`persistence`), one `Autostart` per program, DLL or package a value names
   (a list gives one each), with its `Mechanism` (`name`, and `attack_technique`: its MITRE
   ATT&CK technique, where one fits), key, value, data, program and arguments (`command_line`
@@ -130,6 +254,69 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `ntuser` reads a user's layers and the Program Compatibility Assistant's `Store` (Windows 8 and
   later; each program, its `SACP` data kept as bytes) and `Persisted` (Windows 7), with the
   removable media id of `SIGN.MEDIA=` names (`sign_media`).
+- Traces third-party tools leave in `NTUSER.DAT` (`app_history::ntuser`), one `AppTrace` per
+  tool, list entry, account or setting, with its `App`, key, value and last-write time: each
+  Sysinternals tool whose licence the user accepted (`Software\Sysinternals\<tool>`; its key's
+  last-write time gives a first-use estimate, `first_used`, when the key holds only
+  a readable `EulaAccepted` set to `1`; corroborate execution separately); WinRAR's archives opened and archive names and extraction folders typed
+  (`ArcHistory`, `DialogEditHistory\ArcName`, `ExtrPath`); 7-Zip's archives made, extraction
+  folders and folders browsed and copied to (`Compression\ArcHistory`, `Extraction\PathHistory`,
+  `FM\FolderHistory`, `FM\CopyHistory`: lists of UTF-16 strings) and its panels' last folders;
+  WinZip's `filemenu`, `extract` and `mru\archives`; each OneDrive account's e-mail address,
+  folder and names (`Accounts\<account>`), and its synced libraries and folders
+  (`ScopeIdToMountPointPathCache`, `Tenants\<tenant>`); Adobe Acrobat's and Reader's recent files
+  and folders (`AVGeneral\cRecentFiles`, `cRecentFolders`), with their file names, sizes and
+  dates; and every value TeamViewer and CCleaner keep in `Software\TeamViewer` and
+  `Software\Piriform\CCleaner`. A list's entries carry their positions (0 the most recent); a
+  list that doesn't decode keeps its bytes.
+- Installed software (`installed`), one `Program` per key, with its `ProgramSource`, `Scope`
+  (`machine` or `user`), key and last-write time, and the problems its values have (their bytes
+  kept): `software` reads `SOFTWARE`'s `Uninstall` entries (and `Wow6432Node`'s: name, version,
+  publisher, install date written `YYYYMMDD` (`install_date`), folders, uninstall commands, size,
+  `SystemComponent`, `WindowsInstaller`, the product code of an entry named after one, and its
+  `DisplayIcon`, `ParentKeyName`, `ReleaseType` and `Inno Setup: User`), Windows Installer
+  products (`Classes\Installer\Products`: the product code unpacked from the key's name
+  (`unpack_guid`), `ProductName`, `Version` (`msi_version`), `PackageCode`, and the package's
+  name and the folder it was last installed from, from `SourceList`), App Paths (the program and
+  its `Path`, and `Wow6432Node`'s) and packaged apps (`Appx\AppxAllUserStore`'s `Applications`,
+  `InboxApplications`, `Staged`, `Deprovisioned`, each user's `<SID>` and `EndOfLife\<SID>`, each
+  package's name, version, architecture and publisher id from its full name (`package_name`), and
+  its `Path`); `ntuser` reads a user's `Uninstall` entries, Windows Installer products
+  (`Software\Microsoft\Installer\Products`), App Paths and WSL distributions (`Lxss\{GUID}`:
+  `DistributionName`, `BasePath`, the WSL version its `Flags` say, `State`, `DefaultUid`, the file
+  system's `Version`, `PackageFamilyName`, and whether it is the default).
+
+- USB history (`usb`): from `SYSTEM`, a control set's USB storage devices (`Enum\USBSTOR`), USB
+  devices (`Enum\USB`) and portable devices (`Enum\SWD\WPDBUSENUM`) (`devices`, `Device`): each
+  with its type, vendor, product and revision, or vendor and product IDs (`storage_name`,
+  `vid_pid`), its serial number (`serial`: without the logical unit, and none when Windows made
+  the instance up), `FriendlyName`, `ContainerID`, driver, and the times its device properties
+  keep (`{83da6326-97a6-4088-9453-a1923f573b29}`, in the Windows 8+ and the Windows 7 layout):
+  driver last installed (`0064`), device first install (`0065`), last arrival (`0066`) and last
+  removal (`0067`);
+  `MountedDevices` (`mounted_devices`: each drive letter's and volume GUID's MBR disk signature
+  and offset, GPT partition, or device path, and the device a path names, `device_ref`); from
+  `SOFTWARE`, `Windows Portable Devices` (`portable_devices`: the name Explorer gave a device or
+  volume) and ReadyBoost's `EMDMgmt` (`ready_boost`: a volume's label and serial number); from
+  `NTUSER.DAT`, `MountPoints2` (`mount_points`: the volumes and shares a user had mounted, with
+  `_LabelFromReg`). `history` joins them: one record per device and volume of its (letters,
+  names, serial numbers, the users who had it), then the volumes no device key names (an internal
+  disk's, or a removed device's whose `Enum` key is gone), drive letters without a volume GUID
+  value, and the devices only `SOFTWARE` names.
+  VID/PID joins require a matching usable container ID; serial fallback is used only without
+  one. Conflicting matching IDs remain unknown and produce a problem. Contributing USB and
+  portable-device keys retain their provenance and replay state, within the same control set.
+  A property that isn't a FILETIME keeps its bytes in a problem.
+
+- The audit policy in force (`audit_policy`), from a `SECURITY` hive's `Policy\PolAdtEv`: which
+  security events the system was set to log. `audit_events` decodes the value by its layout:
+  Windows Vista and later keep a setting per subcategory (a header, the settings category by
+  category in Windows' own order of each category's subcategories, the index in their message
+  ID: `%%12548` is Logon/Logoff's index 4, Special Logon; then a table of how many each category
+  has), Windows XP and 2003 a setting per category and whether auditing is on. Each
+  `AuditSetting` has its category, subcategory, GUID, message ID (`subcategory_id`, as event 4719
+  gives it) and `Setting`: none, success, failure, or both. A value of an unknown layout or
+  size is a problem and keeps its bytes.
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
@@ -201,15 +388,71 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, the dirty ones with their logs; 593 items): the same order, names and shortcut names
   as a reader built on yarp and [libfwsi](https://github.com/libyal/libfwsi)'s shell item
   parser.
+- Most-recently-used lists on the 25 public `NTUSER.DAT` hives with them (regipy's, Plaso's,
+  notatin's, artemis' and the DFIR Artifact Museum's, Windows XP to 11): the same `RunMRU` (60),
+  `TypedPaths` (65), `WordWheelQuery` (59) and `TypedURLs` (80) entries in the same order as
+  Plaso's `mrulist`, `mrulistex` and `typedurls` and regipy's `runmru`, `typed_paths`,
+  `word_wheel_query` and `typed_urls` (but for one address regipy cuts at 256 characters, and one
+  in artemis' damaged hive, which Plaso stops reading), the same 41 `TypedURLsTime` times as
+  Plaso's `typedurlstime`, to the 100 ns, and the same Paint (14), WordPad (5) and `ACMru` (43)
+  values as regipy reads.
 - UserAssist on 12 public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's and the DFIR Artifact
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
   duplicates and its rounding of times to the microsecond.
+- Security settings on 24 public `SOFTWARE` and `SYSTEM` hives (regipy's, Plaso's, notatin's and
+  the DFIR Artifact Museum's, Windows 7 to 11 and Server 2012 R2 and 2022, every control set,
+  read without their logs): the same values as regipy's `windows_defender` (10), `uac_plugin`
+  (25), `wdigest` (1), `execution_policy` (2) and `disable_last_access` (18); every one of the
+  564 settings found has the value python-registry reads, but 4 on regipy's damaged `SYSTEM`,
+  where python-registry stops at the key and dissect.regf reads the same values.
+- Remote connections on 27 public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's, artemis' and
+  the DFIR Artifact Museum's, Windows XP to 11): the same Remote Desktop servers, accounts and
+  times (11), PuTTY sessions (1) and host keys (5), WinSCP sessions (4) and mapped drives (9) as
+  regipy's `terminal_services_history`, `putty`, `winscp_saved_sessions` and
+  `network_drives_plugin`; the same `Default` MRU lists (10 computers), `LocalDevices`, mapped
+  drives, `MountPoints2` shares (16) and *Map Network Drive* lists (9 paths) as Plaso's
+  `mstsc_rdp`, `mstsc_rdp_mru`, `network_drives`, `explorer_mountpoints2` and `mrulist_string`,
+  to the 100 ns. Plaso also lists the redirected printers under `Default\AddIns\RDPDR` as
+  servers; they aren't. The host keys' fingerprints (6, PuTTY's and WinSCP's) are the SHA-256
+  digests dissect's `putty` gives; 16 generated keys of every type have the fingerprints OpenSSH's
+  `ssh-keygen -l` gives (DSA and Ed448, which it no longer reads: the SHA-256 of pycryptodome's
+  encoding).
+- The common dialogs' lists on the 9 public `NTUSER.DAT` hives with them (regipy's, Plaso's,
+  notatin's and the DFIR Artifact Museum's, Windows XP to 10; 1,398 entries in all 7 lists): the
+  same entries in the same order, with the same programs and paths, as Plaso's `mrulist` and
+  `mrulistex` plugins. (regipy's `comdlg32` finds none on these hives: it reads the values' data
+  as hex text.)
+- MuiCache on 36 public `UsrClass.dat` and `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's, Windows XP to 11; 16 with MuiCache, 827 values): the
+  same programs, friendly names and companies as dissect.target's `muicache` and the same 197
+  resource strings left out; the same values as regipy reads but for 2 paths whose one-byte names
+  have a letter past ASCII (`Niðurhal`, `Startmenü`), which regipy decodes as `�`.
+- ShellBags on 18 public `UsrClass.dat` and `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's, Windows XP to 11; 252 items in 8 of them): the same
+  keys and values as [libfwsi](https://github.com/libyal/libfwsi) with libregf, Plaso's
+  `bagmru`, regipy's `shellbags_usrclass` and `shellbags_ntuser` (which don't read
+  `ShellNoRoam`) and dissect.target's `shellbags` read, in the same `MRUListEx` order as the
+  first three, with the same last-write times as regipy; regipy's `node_slot` is the `NodeSlot`
+  of the key the value is in, not of the item's own key.
 - The Task Scheduler's cache on 7 public `SOFTWARE` hives (regipy's Windows 7 and the DFIR
   Artifact Museum's Windows 10, 11, Server 2012 R2 and Server 2022 ones, the dirty ones with
   their logs; 1,233 tasks, 1,006 `Actions` with 441 exec and 566 COM handler actions): the same
   tasks, lists, actions and times as a separate decoder built on yarp, every `Actions` value
   decoded to its last byte.
+- Office on the 7 public `NTUSER.DAT` hives with its lists (regipy's, Plaso's, notatin's and the
+  DFIR Artifact Museum's, Office 2010 to Microsoft 365): the same 326 `File MRU` and `Place MRU`
+  items (Microsoft 365 accounts' too), with the same paths and times, as dissect.target's Office
+  MRU parser (to its 2 µs: it converts times through floating point), the same 137 Office 2010
+  items as Plaso's `officemru`, to the 100 ns, and the same 10 trust records' times and flags as
+  dissect.target's trust record structure; the same 95 trusted locations as regipy reads.
+- Explorer's use of applications on public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's, Windows XP to 11): the same `ProgramsCache` items
+  (152 on 5 hives) as Plaso's `explorer_programscache`; the same `Favorites` paths (35 on 10
+  hives) as libyal's shell item reader (pyfwsi), with the same 12 packaged app IDs as its
+  property store reader (pyfwps); the same `FavoritesResolve` paths (35) as its link reader
+  (pylnk); and the same `FeatureUsage` counts (228 on 5 hives) and `RecentApps` (4 on 2
+  hives) as its regf reader (pyregf).
 - Local accounts on 7 public `SAM` hives (regipy's and the DFIR Artifact Museum's, Windows 7 to
   11, Server 2012 R2 and 2022; 30 accounts): every `F` and `V` field the same as
   [dissect](https://github.com/fox-it/dissect.target)'s `user_F` and `user_V` structures give,
@@ -220,6 +463,26 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   one record whose type no Windows value has; on those two dirty hives and the DFIR Artifact
   Museum's Windows 11 `SYSTEM`, every key and value that yarp's replay removes or changes is
   recovered from the hive before the replay.
+- System details on public hives of 12 systems (regipy's, Plaso's, notatin's, the DFIR Artifact
+  Museum's and one more public Windows 7 test set; Windows 7 to 11, 8.1, Server 2012 R2 and 2022;
+  12 `SYSTEM`, 9 `SOFTWARE`, 9 `SAM` and 8 `SECURITY` hives, read as they are): the same control
+  set, computer name and its key's time, host name, DNS domain, time zone values and key time,
+  last shutdown and processor architecture as regipy's `active_control_set`, `computer_name`,
+  `host_domain_name`, `timezone_data2`, `shutdown` and `processor_architecture`, but for one
+  `HostName` that regipy, matching value names by case, doesn't find; the same version values,
+  profiles (49, with their times, state and flags) and last signed-in user as its
+  `winver_plugin`, `profilelist_plugin` and `last_logon_plugin`; the same earlier versions as its
+  `previous_winver_plugin`; the same computer SIDs as its `local_sid`, and the same domain names
+  and SIDs as its `domain_sid` (728 values in all). Plaso's `windows_version`, `windows_timezone`
+  and `windows_shutdown` give the same 174 values. The daylight saving changes and biases are those
+  of the zone's `TZI` value in the system's `SOFTWARE` hive on all 8 that have one (an Easter
+  Island zone shows the weekday is last).
+- BAM on 11 public `SYSTEM` hives (regipy's, Plaso's, notatin's, dissect's and the DFIR Artifact
+  Museum's, Windows 7 to 11, Server 2012 R2 and 2022; 8 with BAM keys, both layouts, every
+  control set; 199 entries): the same keys, SIDs, programs and times as regipy's `bam` plugin
+  (which rounds times to the microsecond), and the same programs and times to the 100 ns as
+  Plaso's `bam`. `machine_sid` on two of the Museum's Windows 10 systems: the SID of their local
+  users' BAM keys and `ProfileList` entries, not their domain users'.
 - Autostarts on 10 public `SOFTWARE` and `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
   artemis' and the DFIR Artifact Museum's Windows 10 ones): the same `Run`, `RunOnce`,
   `RunServices` and `Policies\Explorer\Run` values (27) as regipy's `software_plugin` and
@@ -235,25 +498,83 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   strings), as dissect.target's `cit` plugin, which lists one program twice in one database; and
   no layers or custom shim databases in any public `SOFTWARE`, as regipy's `appcompat_flags`
   finds.
+- The audit policy on 8 public `SECURITY` hives (regipy's, the DFIR Artifact Museum's and one
+  more public test set; Windows 10, 11, Server 2012 R2 and 2022, with 59 and 56
+  subcategories): the same 466 settings as dissect's `auditpol`. The order of the subcategories
+  in each category is Windows' own, not their GUIDs': public events 4719 (System audit policy
+  was changed) give the message IDs of 34 subcategories with their GUIDs, and the decoded
+  settings are Windows'
+  documented defaults (Special Logon `success` and IPsec Quick Mode `none`, which GUID order
+  swaps). The Windows XP and 2003 layout is decoded from the `POLICY_AUDIT_EVENTS_INFO`
+  structure: no public hive of theirs was found.
+- Third-party tools' traces on 19 public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's,
+  artemis' and the DFIR Artifact Museum's, Windows 7 to 11; 477 traces): the same 129 Sysinternals
+  tools (name, time, `EulaAccepted`) as regipy's `sysinternals`; the same 40 WinRAR entries as
+  regipy's `winrar_plugin` and, list by list (10), as Plaso's `winrar_mru`; the same CCleaner
+  values (52) and `UpdateKey`s as Plaso's `ccleaner`; and the same 7-Zip lists (201 entries),
+  Adobe Reader recent files, OneDrive accounts and TeamViewer values as a reader built on yarp.
+- Installed software on 10 public `SOFTWARE` and 19 public `NTUSER.DAT` hives (regipy's, Plaso's,
+  notatin's, artemis' and the DFIR Artifact Museum's, Windows 7 to 11, Server 2012 R2 and 2022;
+  1,731 records): the same 434 `Uninstall` entries (key, time and every value read) as regipy's
+  `installed_programs_software` and `installed_programs_ntuser`, the same 112 Windows Installer
+  products (key, time, `ProductName`) as its `software_classes_installer` and
+  `ntuser_classes_installer`, the same 244 App Paths (program, `Path`, time) as its `app_paths`,
+  and the same 7 WSL distributions as its `wsl` (which also lists `Lxss`'s `AppxInstallerCache`
+  key as one); the same 913 packages (key, time, `Path`) as a reader built on yarp. regipy
+  doesn't replay transaction logs: on the two dirty hives, with their logs not applied, the
+  records are the same.
+- USB history on 14 public `SYSTEM` hives (regipy's, Plaso's, dissect's, notatin's and the DFIR
+  Artifact Museum's, Windows 7 to 11 and Server 2012 R2 and 2022): the same USB storage devices
+  (16), USB devices (139) and `MountedDevices` values (138) as regipy's `usbstor_plugin`,
+  `usb_devices` and `mounted_devices` (times to the microsecond regipy rounds to), but for
+  regipy's Windows 7 hive, whose property times regipy doesn't read: there they are the ones
+  Plaso's `windows_usbstor_devices` reads, as are the last-write times of 64 USB device keys
+  (Plaso's `windows_usb_devices`). `MountPoints2` on 19 public `NTUSER.DAT` hives (118 keys): the
+  same keys, servers, shares, labels and times as Plaso's `explorer_mountpoints2`. On the DFIR
+  Artifact Museum's Windows 8.1 hives, `history` gives its 9 USB storage devices the same volume
+  GUIDs, drive letters and users as dissect.target's `usb` plugin.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
   and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
-  (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile,
-  UserAssist, and its dirty `NTUSER.DAT` with the items its logs add); UserAssist built with both
+  (control sets, computer name, services), its Windows 10 1709 `SYSTEM` (BAM in both layouts)
+  and `NTUSER.DAT` (recent documents, profile, UserAssist, and its dirty `NTUSER.DAT` with the
+  items its logs add), and its dirty `UsrClass.dat`'s MuiCache with the programs its logs add;
+  MuiCache built in the Windows 8, 7 and XP forms, with both forms of one program, names in
+  another case, resource strings, `LangID`, a value that isn't a string and one that isn't valid
+  UTF-16; UserAssist built with both
   versions, a value of another size, a version that disagrees with the key's, an unknown GUID,
   session entries and `NoEncrypt`; recent
   documents whose list and values don't add up; a task cache built with real Windows 11 `Actions`
   and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
-  way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`); accounts
-  whose `F`, `V` and `Names` disagree or are cut short, with a password hint, a Microsoft account
-  and `UserDontShowInLogonUI`; autostarts in regipy's `SYSTEM`, `NTUSER.DAT` and `UsrClass.dat`,
+  way round, and `Actions` cut short; regipy's `SAM` (accounts, flags, times, `Names`);
+  Explorer's pins and programs cache in regipy's Windows 7 `NTUSER.DAT`, its recent app and
+  packaged apps pinned in its dirty Windows 10 `NTUSER.DAT`, and every kind of `FeatureUsage`
+  count in its `NTUSER_BAGMRU.DAT`; use counts, recent apps and items, pins, links and a
+  programs cache built with values of other types, a shell item that isn't understood, data that
+  isn't a link and an unknown format version; accounts whose `F`, `V` and `Names` disagree or are
+  cut short, with a password hint, a Microsoft account
+  and `UserDontShowInLogonUI`; regipy's `UsrClass.dat` ShellBags as it is and with its logs
+  (order, parents, `NodeSlot`s, what the logs add), and `BagMRU` trees built with a missing,
+  an unlisted and a non-binary value, a subkey without its value, a `NodeSlot` of the wrong type,
+  `ShellNoRoam`, and subkey lists that loop; autostarts in regipy's `SYSTEM`, `NTUSER.DAT` and `UsrClass.dat`,
   and in built hives with one of each kind, `StartupApproved` entries enabled, disabled and
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
-  machine's; random damage, and random `Actions`, `F` and `V`.
+  machine's; BAM and DAM keys in both layouts with values that aren't `REG_BINARY` or are cut
+  short; `SAM\Domains\Account` `V` with and without the computer's SID; regipy's `NTUSER-WSL.DAT`
+  (a user's `Uninstall` entry, App Paths and WSL distributions); installed software built with
+  each list, an `InstallDate` not written `YYYYMMDD`, a size written as text, a name that isn't
+  valid UTF-16, a product whose key isn't a packed product code and whose `LastUsedSource` isn't
+  `<type>;<index>;<source>`, deprovisioned and removed packages, a name that isn't a package's,
+  and `Lxss` keys that aren't distributions; random damage, and random `Actions`, `F` and `V`.
+  Common-dialog tests also cover Plaso's NTUSER.DAT, missing or unlisted values, truncated
+  shell item lists and strings, incorrect registry types, and repeated MRUList entries.
+  Remote-access tests include notatin's Windows 7 hive, stored-session metadata, SSH
+  fingerprints and malformed records, with passwords omitted.
+  System-info tests include OS versions, time zones, profile times and domain policy values.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose
@@ -264,5 +585,16 @@ data cells the entry didn't write.
 Apache-2.0 (`LICENSE`). The transaction log replay comes from Yamato Security's
 [ys-shimcache-parser](https://github.com/Yamato-Security/ys-shimcache-parser) (Apache-2.0). The
 format is Maxim Suhanov's [Windows registry file format specification](https://github.com/msuhanov/regf)
-(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`);
-the CIT database is Plaso's, under the Apache licence 2.0 (`tests/fixtures/plaso/LICENSE`).
+(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`),
+and Plaso's and notatin's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`,
+`tests/fixtures/notatin/LICENSE`).
+
+Application-history tests also use the DFIR Artifact Museum's hives under MIT (`tests/fixtures/museum/LICENSE`).
+
+Security-setting tests cover malformed values, exclusions, logging and control sets.
+
+Office tests cover recent-file timestamps, trust records, macro settings and trusted locations.
+
+Audit-policy tests cover both layouts and malformed category counts.
+
+AppCompat tests include public CIT data under Plaso's Apache-2.0 fixture licence.
