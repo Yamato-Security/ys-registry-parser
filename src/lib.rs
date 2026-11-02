@@ -39,6 +39,7 @@ pub mod persistence;
 mod recover;
 pub mod remote_access;
 pub mod sam;
+mod shell;
 pub mod shellbags;
 pub mod software;
 pub mod system;

@@ -325,7 +325,7 @@ fn link_name(items: &[u8]) -> Result<(Option<String>, Vec<String>), String> {
 
 /// The long name in a file entry's `0xBEEF0004` extension block after `start`, and malformed
 /// extension blocks. Other extension blocks may come before it.
-fn long_name(item: &[u8], start: usize) -> (Option<String>, Vec<String>) {
+pub(crate) fn long_name(item: &[u8], start: usize) -> (Option<String>, Vec<String>) {
     if item.get(start..).is_none() {
         return (None, Vec::new());
     }
@@ -783,6 +783,479 @@ pub fn classes_sid(hive: &Hive) -> Option<String> {
         && !digits.is_empty()
         && digits.bytes().all(|b| b.is_ascii_digit() || b == b'-'))
     .then(|| sid.to_owned())
+}
+
+/// Where Explorer counts how a user uses applications, under the hive's root: a subkey per
+/// kind of use (`AppSwitched`, `AppLaunch`, `ShowJumpView`, `AppBadgeUpdated`,
+/// `TrayButtonClicked`), each with a `REG_DWORD` count per application (an application user
+/// model ID, or a path whose first part may be a known folder's GUID) or button. Windows 10 and
+/// later.
+pub const FEATURE_USAGE: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FeatureUsage";
+/// Where Windows 10 (up to 1709) kept the applications a user ran recently, under the hive's
+/// root: a `{GUID}` subkey per application (`AppId`, `AppPath`, `LaunchCount`,
+/// `LastAccessedTime`), with the files it opened under `RecentItems` (`DisplayName`, `Path`,
+/// `LastAccessedTime`).
+pub const RECENT_APPS: &str = r"Software\Microsoft\Windows\CurrentVersion\Search\RecentApps";
+/// Where Explorer keeps the programs pinned to the taskbar, under the hive's root: `Favorites`,
+/// a shell item list per pinned item (each a flag byte, its size in 4 bytes, the list; `0xFF`
+/// ends them), and `FavoritesResolve`, the link data of each (its size in 4 bytes, the link).
+pub const TASKBAND: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband";
+/// The keys with `ProgramsCache` values (the Start menu's programs, and with Windows 7 its
+/// pinned programs, `ProgramsCacheSMP`, and the taskbar's, `ProgramsCacheTBP`): a format
+/// version (1, 9, 12 or 19; 12 and 19 then a known folder's GUID), then shell item lists, each
+/// its size in 4 bytes and the list, between sentinel bytes (0 or 1: another follows; 2: the
+/// end; version 9 has none before the first).
+const START_PAGES: [&str; 2] = [
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage",
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage2",
+];
+/// The `ProgramsCache` values.
+const PROGRAMS_CACHES: [&str; 3] = ["ProgramsCache", "ProgramsCacheSMP", "ProgramsCacheTBP"];
+
+/// One application, button or item of Explorer's use counters, recent apps and pins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppUsage {
+    /// Where it comes from: the `FeatureUsage` subkey (`AppSwitched`, `AppLaunch`,
+    /// `ShowJumpView`, `AppBadgeUpdated`, `TrayButtonClicked`, …), `RecentApps`, `RecentItems`,
+    /// `Taskband` or `ProgramsCache`.
+    pub source: String,
+    /// The key it is in, under the hive's root.
+    pub key_path: String,
+    /// When that key was last written (FILETIME).
+    pub key_last_written: u64,
+    /// The value it comes from (a `FeatureUsage` count's name; `Favorites`, `FavoritesResolve`,
+    /// `ProgramsCache`, …); empty for `RecentApps` and `RecentItems`, whose key is the item.
+    pub value_name: String,
+    /// Its place in its value's list, from 0 (`Taskband`, `ProgramsCache`).
+    pub index: Option<usize>,
+    /// The application: a `FeatureUsage` value's name (an application user model ID, a path, a
+    /// button), a recent app's `AppId`, a pinned item's application user model ID.
+    pub application: Option<String>,
+    /// A `FeatureUsage` count, or a recent app's `LaunchCount`.
+    pub count: Option<u32>,
+    /// `LastAccessedTime` (FILETIME) of a recent app or item.
+    pub last_accessed: Option<u64>,
+    /// A recent item's `Path` or a recent app's `AppPath`; a pinned or cached item's shell item
+    /// path (`User Pinned\TaskBar\File Explorer.lnk`); a `FavoritesResolve` link's path.
+    pub item_path: Option<String>,
+    /// A recent item's `DisplayName`.
+    pub display_name: Option<String>,
+    /// How a pinned item was pinned (`UserPinned`, `SystemPinned`, …).
+    pub pin_type: Option<String>,
+    /// Its bytes, when they don't decode: a value's data, or a list item's.
+    pub data_raw: Option<Vec<u8>>,
+    /// Whether the transaction logs' replay wrote its value (or its key, for `RecentApps` and
+    /// `RecentItems`).
+    pub replayed: bool,
+    /// What couldn't be read.
+    pub problems: Vec<String>,
+}
+
+/// The counts of `FeatureUsage`'s subkeys, each subkey's values in the hive's order, with what
+/// keeps keys from being read. `None` when the hive has no `FeatureUsage` key.
+#[must_use]
+pub fn feature_usage(hive: &Hive) -> Option<(Vec<AppUsage>, Vec<String>)> {
+    let key = hive.key(FEATURE_USAGE)?;
+    let (kinds, mut problems) = key.subkeys();
+    let mut entries = Vec::new();
+    for kind in &kinds {
+        let source = kind.name();
+        let key_path = format!(r"{FEATURE_USAGE}\{source}");
+        let (values, why) = kind.values();
+        problems.extend(why.into_iter().map(|w| format!(r"{source}: {w}")));
+        for value in &values {
+            let mut entry = AppUsage {
+                source: source.clone(),
+                key_path: key_path.clone(),
+                key_last_written: kind.last_written(),
+                value_name: value.name(),
+                application: Some(value.name()),
+                replayed: value.status() == Status::Replayed,
+                ..AppUsage::default()
+            };
+            match crate::system::number(value) {
+                Ok(n) => entry.count = Some(n),
+                Err(why) => {
+                    entry.problems.push(why);
+                    entry.data_raw = Some(value.read_data().0);
+                }
+            }
+            entries.push(entry);
+        }
+    }
+    Some((entries, problems))
+}
+
+/// When `FeatureUsage` was made: its `KeyCreationTime` (a `REG_QWORD` FILETIME).
+#[must_use]
+pub fn feature_usage_created(hive: &Hive) -> Option<u64> {
+    let value = hive.key(FEATURE_USAGE)?.value("KeyCreationTime")?;
+    match decode(value.data_type(), &value.data().ok()?) {
+        Data::Number(n) if value.value_type() == ValueType::Qword => Some(n),
+        _ => None,
+    }
+}
+
+/// The applications of `RecentApps`, each followed by its `RecentItems`, with what keeps keys
+/// from being read. `None` when the hive has no `RecentApps` key.
+#[must_use]
+pub fn recent_apps(hive: &Hive) -> Option<(Vec<AppUsage>, Vec<String>)> {
+    let key = hive.key(RECENT_APPS)?;
+    let (apps, mut problems) = key.subkeys();
+    let mut entries = Vec::new();
+    for app in &apps {
+        let key_path = format!(r"{RECENT_APPS}\{}", app.name());
+        let mut entry = recent_entry("RecentApps", &key_path, app);
+        entry.application = take_text(app, "AppId", &mut entry);
+        entry.item_path = take_text(app, "AppPath", &mut entry).filter(|p| !p.is_empty());
+        if let Some(value) = app.value("LaunchCount") {
+            match crate::system::number(&value) {
+                Ok(n) => entry.count = Some(n),
+                Err(why) => {
+                    entry.problems.push(format!("LaunchCount: {why}"));
+                    if entry.data_raw.is_none() {
+                        entry.data_raw = Some(value.read_data().0);
+                    }
+                }
+            }
+        }
+        let application = entry.application.clone();
+        entries.push(entry);
+        let Some(items) = app.subkey("RecentItems") else {
+            continue;
+        };
+        let (items, why) = items.subkeys();
+        problems.extend(
+            why.into_iter()
+                .map(|w| format!(r"{}\RecentItems: {w}", app.name())),
+        );
+        for item in &items {
+            let path = format!(r"{key_path}\RecentItems\{}", item.name());
+            let mut entry = recent_entry("RecentItems", &path, item);
+            entry.application.clone_from(&application);
+            entry.display_name = take_text(item, "DisplayName", &mut entry);
+            entry.item_path = take_text(item, "Path", &mut entry);
+            entries.push(entry);
+        }
+    }
+    Some((entries, problems))
+}
+
+/// A `RecentApps` or `RecentItems` key's entry, with its `LastAccessedTime`.
+fn recent_entry(source: &str, key_path: &str, key: &Key) -> AppUsage {
+    let (values, why) = key.values();
+    let mut entry = AppUsage {
+        source: source.to_owned(),
+        key_path: key_path.to_owned(),
+        key_last_written: key.last_written(),
+        replayed: key.status() == Status::Replayed
+            || values.iter().any(|v| v.status() == Status::Replayed),
+        problems: why,
+        ..AppUsage::default()
+    };
+    if let Some(value) = key.value("LastAccessedTime") {
+        let (bytes, read) = value.read_data();
+        match (value.value_type(), decode(value.data_type(), &bytes), read) {
+            (ValueType::Qword, Data::Number(0), None) => {}
+            (ValueType::Qword, Data::Number(t), None) if filetime(t).is_some() => {
+                entry.last_accessed = Some(t);
+            }
+            (ValueType::Qword, Data::Number(t), None) => entry
+                .problems
+                .push(format!("LastAccessedTime 0x{t:016x} is past 9999")),
+            (kind, _, read) => {
+                entry.problems.push(format!(
+                    "LastAccessedTime: {}",
+                    read.unwrap_or_else(|| format!("is {}, not REG_QWORD", kind.name()))
+                ));
+                entry.data_raw = Some(bytes);
+            }
+        }
+    }
+    entry
+}
+
+/// The text of `key`'s value `name`; what is wrong with it goes to `entry`'s problems.
+fn take_text(key: &Key, name: &str, entry: &mut AppUsage) -> Option<String> {
+    let value = key.value(name)?;
+    let (text, why) = crate::system::string(&value);
+    if why.is_some() && entry.data_raw.is_none() {
+        entry.data_raw = Some(value.read_data().0);
+    }
+    entry
+        .problems
+        .extend(why.map(|why| format!("{name}: {why}")));
+    text
+}
+
+/// The pinned items of `Taskband`: one per item of `Favorites` (its shell item path,
+/// application ID and pin type) and of `FavoritesResolve` (its link's path), with what keeps
+/// the key from being read. `None` when the hive has no `Taskband` key.
+#[must_use]
+pub fn taskband(hive: &Hive) -> Option<(Vec<AppUsage>, Vec<String>)> {
+    let key = hive.key(TASKBAND)?;
+    let (values, problems) = key.values();
+    let mut entries = Vec::new();
+    for value in &values {
+        let name = value.name();
+        let resolve = if name.eq_ignore_ascii_case("Favorites") {
+            false
+        } else if name.eq_ignore_ascii_case("FavoritesResolve") {
+            true
+        } else {
+            continue;
+        };
+        let template = AppUsage {
+            source: "Taskband".to_owned(),
+            key_path: TASKBAND.to_owned(),
+            key_last_written: key.last_written(),
+            value_name: name,
+            replayed: value.status() == Status::Replayed,
+            ..AppUsage::default()
+        };
+        let (bytes, read) = value.read_data();
+        let (items, why) = if resolve {
+            sized_items(&bytes, 0)
+        } else {
+            flagged_items(&bytes)
+        };
+        let whole: Vec<String> = read
+            .into_iter()
+            .chain(why)
+            .chain(
+                (value.value_type() != ValueType::Binary)
+                    .then(|| format!("is {}, not REG_BINARY", value.value_type().name())),
+            )
+            .collect();
+        if !whole.is_empty() {
+            entries.push(AppUsage {
+                problems: whole,
+                data_raw: Some(bytes.clone()),
+                ..template.clone()
+            });
+        }
+        for (index, item) in items.iter().enumerate() {
+            let mut entry = AppUsage {
+                index: Some(index),
+                ..template.clone()
+            };
+            if resolve {
+                match crate::shell::link(item) {
+                    Ok(target) => {
+                        entry.item_path = target.path;
+                        entry.application = target.app_id;
+                        entry.problems.extend(target.problems);
+                    }
+                    Err(why) => entry.problems.push(why),
+                }
+                if entry.item_path.is_none() {
+                    entry.data_raw = Some(item.to_vec());
+                }
+            } else {
+                list_entry(&mut entry, item);
+            }
+            entries.push(entry);
+        }
+    }
+    Some((entries, problems))
+}
+
+/// `entry`'s path, application ID and pin type from the shell item list `items` (an empty list,
+/// the folder the list is in, has no path); its bytes kept when the list isn't understood.
+fn list_entry(entry: &mut AppUsage, items: &[u8]) {
+    let list = crate::shell::item_list(items);
+    entry.item_path = list.path;
+    entry.application = list.app_id;
+    entry.pin_type = list.pin_type;
+    if !list.problems.is_empty() {
+        entry.problems.extend(list.problems);
+        entry.data_raw = Some(items.to_vec());
+    }
+}
+
+/// The lists of `Favorites`: each a flag byte, its size in 4 bytes and the list, until `0xFF`
+/// or the data's end; and what is wrong with the data.
+fn flagged_items(bytes: &[u8]) -> (Vec<&[u8]>, Option<String>) {
+    let mut items = Vec::new();
+    let mut at = 0;
+    while let Some(&flag) = bytes.get(at) {
+        if flag == 0xff {
+            return (items, None);
+        }
+        let (more, why) = sized_items(bytes.get(at + 1..).unwrap_or_default(), 1);
+        let Some(item) = more.into_iter().next() else {
+            return (items, why);
+        };
+        at += 1 + 4 + item.len();
+        items.push(item);
+    }
+    (items, None)
+}
+
+/// Up to `max` items (0: every one) of `bytes`, each its size in 4 bytes, then that many bytes;
+/// and what is wrong with the data.
+fn sized_items(bytes: &[u8], max: usize) -> (Vec<&[u8]>, Option<String>) {
+    let mut items = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() && (max == 0 || items.len() < max) {
+        let Some(size) = u32_at(bytes, at).map(|s| s as usize) else {
+            return (
+                items,
+                Some(format!(
+                    "{} bytes at {at} are not an item's size",
+                    bytes.len() - at
+                )),
+            );
+        };
+        if size == 0 && max == 0 {
+            // FavoritesResolve ends with zeros
+            if bytes[at..].iter().all(|&b| b == 0) {
+                break;
+            }
+        }
+        let Some(item) = bytes.get(at + 4..(at + 4).saturating_add(size)) else {
+            return (
+                items,
+                Some(format!(
+                    "the item at {at} of {size} bytes is past the data's {}",
+                    bytes.len()
+                )),
+            );
+        };
+        items.push(item);
+        at += 4 + size;
+    }
+    (items, None)
+}
+
+/// The items of the `ProgramsCache` values (`ProgramsCache`, `ProgramsCacheSMP`,
+/// `ProgramsCacheTBP`) of `StartPage` and `StartPage2`: one per shell item list, its path and
+/// application ID; with what keeps the keys from being read. `None` when the hive has none of
+/// these values.
+#[must_use]
+pub fn programs_cache(hive: &Hive) -> Option<(Vec<AppUsage>, Vec<String>)> {
+    let mut found = false;
+    let mut entries = Vec::new();
+    let mut problems = Vec::new();
+    for key_path in START_PAGES {
+        let Some(key) = hive.key(key_path) else {
+            continue;
+        };
+        let (values, why) = key.values();
+        problems.extend(why.into_iter().map(|w| format!("{key_path}: {w}")));
+        for value in &values {
+            let name = value.name();
+            if !PROGRAMS_CACHES
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(&name))
+            {
+                continue;
+            }
+            found = true;
+            let template = AppUsage {
+                source: "ProgramsCache".to_owned(),
+                key_path: key_path.to_owned(),
+                key_last_written: key.last_written(),
+                value_name: name,
+                replayed: value.status() == Status::Replayed,
+                ..AppUsage::default()
+            };
+            let (bytes, read) = value.read_data();
+            let (items, why) = programs_cache_items(&bytes);
+            let whole: Vec<String> = read
+                .into_iter()
+                .chain(why)
+                .chain(
+                    (value.value_type() != ValueType::Binary)
+                        .then(|| format!("is {}, not REG_BINARY", value.value_type().name())),
+                )
+                .collect();
+            if !whole.is_empty() {
+                entries.push(AppUsage {
+                    problems: whole,
+                    data_raw: Some(bytes.clone()),
+                    ..template.clone()
+                });
+            }
+            for (index, item) in items.iter().enumerate() {
+                let mut entry = AppUsage {
+                    index: Some(index),
+                    ..template.clone()
+                };
+                list_entry(&mut entry, item);
+                entries.push(entry);
+            }
+        }
+    }
+    found.then_some((entries, problems))
+}
+
+/// The shell item lists of a `ProgramsCache` value, and what is wrong with it.
+fn programs_cache_items(bytes: &[u8]) -> (Vec<&[u8]>, Option<String>) {
+    let mut at = match u32_at(bytes, 0) {
+        Some(1) => 8,
+        Some(9) => 6,
+        Some(12 | 19) => 20,
+        Some(version) => {
+            return (
+                Vec::new(),
+                Some(format!("format version {version} is not known")),
+            );
+        }
+        None => {
+            return (
+                Vec::new(),
+                Some(format!("{} bytes: no format version", bytes.len())),
+            );
+        }
+    };
+    let mut items = Vec::new();
+    let mut sentinel = if u32_at(bytes, 0) == Some(9) {
+        0
+    } else {
+        let Some(&s) = bytes.get(at) else {
+            return (
+                items,
+                Some(format!("it ends at {at}, before its first sentinel")),
+            );
+        };
+        at += 1;
+        s
+    };
+    while sentinel < 2 && at < bytes.len() {
+        let (more, why) = sized_items(&bytes[at..], 1);
+        let Some(item) = more.into_iter().next() else {
+            return (items, why);
+        };
+        at += 4 + item.len();
+        items.push(item);
+        let Some(&s) = bytes.get(at) else {
+            return (
+                items,
+                Some(format!("it ends at {at}, without its end sentinel")),
+            );
+        };
+        at += 1;
+        sentinel = s;
+    }
+    if sentinel > 2 {
+        return (
+            items,
+            Some(format!(
+                "sentinel {sentinel} at {} is not 0, 1 or 2",
+                at - 1
+            )),
+        );
+    }
+    if sentinel < 2 {
+        return (
+            items,
+            Some(format!(
+                "it ends at {at}, where its sentinel says a list follows"
+            )),
+        );
+    }
+    (items, None)
 }
 
 /// The default path of the known folder `guid` (`{1AC14E77-…}`, in any case).
@@ -1283,6 +1756,21 @@ fn profile_in(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    proptest::proptest! {
+        /// `Favorites`, `FavoritesResolve` and `ProgramsCache` framing of any bytes, after each
+        /// format version: read as far as they go.
+        #[test]
+        fn pinned_and_cached_lists(
+            version in 0u32..21,
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..400)
+        ) {
+            let _ = (flagged_items(&bytes), sized_items(&bytes, 0), sized_items(&bytes, 1));
+            let mut cache = version.to_le_bytes().to_vec();
+            cache.extend_from_slice(&bytes);
+            let _ = programs_cache_items(&cache);
+        }
+    }
 
     fn utf16(s: &str) -> Vec<u8> {
         s.encode_utf16().flat_map(u16::to_le_bytes).collect()

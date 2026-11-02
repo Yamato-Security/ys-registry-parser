@@ -624,6 +624,306 @@ fn recent_docs_that_dont_add_up() {
 }
 
 /// Bytes from hex.
+/// A shell item of `kind` with `body` after its size and type.
+fn shell_item(kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut item = vec![0, 0, kind];
+    item.extend_from_slice(body);
+    let size = u16::try_from(item.len()).unwrap();
+    item[..2].copy_from_slice(&size.to_le_bytes());
+    item
+}
+
+/// A file entry (`0x31` a folder, `0x32` a file) named `short`, with a version 9 `0xBEEF0004`
+/// block holding `long`, then `0xBEEF001D`/`0xBEEF001E`-style blocks of `(signature, text)`.
+fn file_item(kind: u8, short: &str, long: &str, blocks: &[(u32, &str)]) -> Vec<u8> {
+    let mut body = vec![0u8; 11];
+    body.extend_from_slice(short.as_bytes());
+    body.push(0);
+    if body.len().is_multiple_of(2) {
+        body.push(0);
+    }
+    let mut long_block = vec![0, 0, 9, 0];
+    long_block.extend_from_slice(&0xbeef_0004u32.to_le_bytes());
+    long_block.extend_from_slice(&[0; 38]);
+    long_block.extend(utf16z(long));
+    long_block.extend_from_slice(&[0x14, 0]);
+    let mut all = vec![long_block];
+    for (signature, text) in blocks {
+        let mut block = vec![0, 0, 0, 0];
+        block.extend_from_slice(&signature.to_le_bytes());
+        block.extend_from_slice(&[2, 0]);
+        block.extend(utf16z(text));
+        block.extend_from_slice(&[0x1c, 0]);
+        all.push(block);
+    }
+    for mut block in all {
+        let size = u16::try_from(block.len()).unwrap();
+        block[..2].copy_from_slice(&size.to_le_bytes());
+        body.extend(block);
+    }
+    body.extend_from_slice(&[0x14, 0]);
+    shell_item(kind, &body)
+}
+
+/// A shell item list of `items`, ended by an item of size 0.
+fn item_list(items: &[Vec<u8>]) -> Vec<u8> {
+    let mut list: Vec<u8> = items.concat();
+    list.extend_from_slice(&[0, 0]);
+    list
+}
+
+/// Shell link data whose `LinkInfo` gives `path` as its local base path.
+fn link_to(path: &str) -> Vec<u8> {
+    let mut link = vec![0u8; 0x4c];
+    link[0] = 0x4c;
+    link[4..20].copy_from_slice(&[1, 0x14, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+    link[0x14] = 0x02;
+    let mut info = vec![0u8; 0x1c];
+    info[4] = 0x1c;
+    info[8] = 0x01;
+    info[0x10] = 0x1c;
+    info.extend_from_slice(path.as_bytes());
+    info.push(0);
+    info[0x18] = u8::try_from(info.len()).unwrap();
+    info.push(0);
+    let size = u32::try_from(info.len()).unwrap();
+    info[..4].copy_from_slice(&size.to_le_bytes());
+    link.extend(info);
+    link
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn explorer_use_counts_recent_apps_and_pins() {
+    /// A pin: its value, index, path, application ID and pin type.
+    type Pin<'a> = (
+        &'a str,
+        Option<usize>,
+        Option<&'a str>,
+        Option<&'a str>,
+        Option<&'a str>,
+    );
+    use ys_registry_parser::ntuser::{
+        AppUsage, FEATURE_USAGE, RECENT_APPS, TASKBAND, feature_usage, feature_usage_created,
+        programs_cache, recent_apps, taskband,
+    };
+    let switched = format!(r"{FEATURE_USAGE}\AppSwitched");
+    let tray = format!(r"{FEATURE_USAGE}\TrayButtonClicked");
+    let app = format!(r"{RECENT_APPS}\{{6153EB14-4709-4178-8D85-8DC8A345B6FC}}");
+    let item = format!(r"{app}\RecentItems\{{0B2C3D4E-0000-0000-0000-000000000001}}");
+    let bad_app = format!(r"{RECENT_APPS}\{{7153EB14-4709-4178-8D85-8DC8A345B6FC}}");
+    // {1F3427C8-5C10-4210-AA03-2EE45287D668}: User Pinned
+    let pinned = shell_item(
+        0x1f,
+        &[
+            0x80, 0xc8, 0x27, 0x34, 0x1f, 0x10, 0x5c, 0x10, 0x42, 0xaa, 0x03, 0x2e, 0xe4, 0x52,
+            0x87, 0xd6, 0x68,
+        ],
+    );
+    let tool = item_list(&[
+        pinned.clone(),
+        file_item(0x31, "TaskBar", "TaskBar", &[]),
+        file_item(
+            0x32,
+            "TOOL~1.LNK",
+            "Tool.lnk",
+            &[(0xbeef_001d, "Contoso.Tool"), (0xbeef_001e, "UserPinned")],
+        ),
+    ]);
+    let unknown = item_list(&[shell_item(0x71, &[1, 2, 3])]);
+    let mut favorites = Vec::new();
+    for list in [&tool, &unknown] {
+        favorites.push(0);
+        favorites.extend(u32::try_from(list.len()).unwrap().to_le_bytes());
+        favorites.extend_from_slice(list);
+    }
+    favorites.push(0xff);
+    let mut resolve = Vec::new();
+    for link in [
+        link_to(
+            r"C:\Users\alice\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Tool.lnk",
+        ),
+        b"not a link".to_vec(),
+    ] {
+        resolve.extend(u32::try_from(link.len()).unwrap().to_le_bytes());
+        resolve.extend(link);
+    }
+    // ProgramsCache version 19: the Start Menu's GUID, then a folder and a shortcut in it
+    let mut cache = 19u32.to_le_bytes().to_vec();
+    cache.extend([
+        0xc3, 0x53, 0x5b, 0x62, 0x48, 0xab, 0xc1, 0x4e, 0xba, 0x1f, 0xa1, 0xef, 0x41, 0x46, 0xfc,
+        0x19,
+    ]);
+    for (sentinel, list) in [
+        (
+            0u8,
+            item_list(&[file_item(0x31, "PROGRA~1", "Programs", &[])]),
+        ),
+        (
+            1,
+            item_list(&[file_item(0x32, "TOOL~1.LNK", "Tool.lnk", &[])]),
+        ),
+    ] {
+        cache.push(sentinel);
+        cache.extend(u32::try_from(list.len()).unwrap().to_le_bytes());
+        cache.extend(list);
+    }
+    cache.push(2);
+    let start2 = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage2";
+    let mut t = Tree::default();
+    t.set(FEATURE_USAGE, "KeyCreationTime", 11, &WHEN.to_le_bytes())
+        .dword(&switched, "Microsoft.Windows.Explorer", 7)
+        .dword(&switched, r"C:\Users\alice\Downloads\tool.exe", 2)
+        .sz(&switched, "Damaged", "3")
+        .dword(&tray, "StartButton", 4)
+        .sz(&app, "AppId", "Contoso.App_abc!App")
+        .sz(&app, "AppPath", "")
+        .dword(&app, "LaunchCount", 3)
+        .set(&app, "LastAccessedTime", 11, &WHEN.to_le_bytes())
+        .sz(&item, "DisplayName", "report.docx")
+        .sz(&item, "Path", r"C:\Users\alice\report.docx")
+        .set(&item, "LastAccessedTime", 11, &(WHEN + 1).to_le_bytes())
+        .sz(&bad_app, "AppId", r"C:\Tools\y.exe")
+        .set(&bad_app, "LastAccessedTime", 3, &[1, 2, 3])
+        .set(TASKBAND, "Favorites", 3, &favorites)
+        .set(TASKBAND, "FavoritesResolve", 3, &resolve)
+        .dword(TASKBAND, "FavoritesVersion", 3)
+        .set(start2, "ProgramsCache", 3, &cache)
+        .set(start2, "ProgramsCacheSMP", 3, &[7, 0, 0, 0, 0]);
+    let hive = t.hive("ROOT");
+
+    let (entries, problems) = feature_usage(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let got: Vec<(&str, &str, Option<u32>)> = entries
+        .iter()
+        .map(|e| (e.source.as_str(), e.value_name.as_str(), e.count))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("AppSwitched", "Microsoft.Windows.Explorer", Some(7)),
+            ("AppSwitched", r"C:\Users\alice\Downloads\tool.exe", Some(2)),
+            ("AppSwitched", "Damaged", None),
+            ("TrayButtonClicked", "StartButton", Some(4)),
+        ]
+    );
+    assert_eq!(
+        entries[0].application.as_deref(),
+        Some("Microsoft.Windows.Explorer")
+    );
+    assert_eq!(entries[0].key_path, switched);
+    assert_eq!(entries[2].problems, ["is REG_SZ, not REG_DWORD"]);
+    assert_eq!(entries[2].data_raw.as_deref(), Some(&utf16z("3")[..]));
+    assert_eq!(feature_usage_created(&hive), Some(WHEN));
+
+    let (entries, problems) = recent_apps(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        entries[..2],
+        [
+            AppUsage {
+                source: "RecentApps".to_owned(),
+                key_path: app.clone(),
+                key_last_written: WHEN,
+                application: Some("Contoso.App_abc!App".to_owned()),
+                count: Some(3),
+                last_accessed: Some(WHEN),
+                ..AppUsage::default()
+            },
+            AppUsage {
+                source: "RecentItems".to_owned(),
+                key_path: item.clone(),
+                key_last_written: WHEN,
+                application: Some("Contoso.App_abc!App".to_owned()),
+                last_accessed: Some(WHEN + 1),
+                item_path: Some(r"C:\Users\alice\report.docx".to_owned()),
+                display_name: Some("report.docx".to_owned()),
+                ..AppUsage::default()
+            },
+        ]
+    );
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[2].application.as_deref(), Some(r"C:\Tools\y.exe"));
+    assert_eq!(entries[2].last_accessed, None);
+    assert_eq!(
+        entries[2].problems,
+        ["LastAccessedTime: is REG_BINARY, not REG_QWORD"]
+    );
+    assert_eq!(entries[2].data_raw.as_deref(), Some(&[1u8, 2, 3][..]));
+
+    let (entries, problems) = taskband(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let got: Vec<Pin> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.value_name.as_str(),
+                e.index,
+                e.item_path.as_deref(),
+                e.application.as_deref(),
+                e.pin_type.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "Favorites",
+                Some(0),
+                Some(r"User Pinned\TaskBar\Tool.lnk"),
+                Some("Contoso.Tool"),
+                Some("UserPinned")
+            ),
+            ("Favorites", Some(1), None, None, None),
+            (
+                "FavoritesResolve",
+                Some(0),
+                Some(
+                    r"C:\Users\alice\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Tool.lnk"
+                ),
+                None,
+                None
+            ),
+            ("FavoritesResolve", Some(1), None, None, None),
+        ]
+    );
+    // what isn't understood keeps its bytes
+    assert_eq!(
+        entries[1].problems,
+        ["shell item 1: of type 0x71, not decoded"]
+    );
+    assert_eq!(entries[1].data_raw.as_deref(), Some(&unknown[..]));
+    assert_eq!(
+        entries[3].problems,
+        ["not shell link data (no 0x4C header with the shell link class ID)"]
+    );
+    assert_eq!(entries[3].data_raw.as_deref(), Some(&b"not a link"[..]));
+    assert!(entries[0].problems.is_empty() && entries[0].data_raw.is_none());
+
+    let (entries, problems) = programs_cache(&hive).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let got: Vec<(&str, Option<usize>, Option<&str>)> = entries
+        .iter()
+        .map(|e| (e.value_name.as_str(), e.index, e.item_path.as_deref()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("ProgramsCache", Some(0), Some("Programs")),
+            ("ProgramsCache", Some(1), Some("Tool.lnk")),
+            ("ProgramsCacheSMP", None, None),
+        ]
+    );
+    assert_eq!(entries[2].problems, ["format version 7 is not known"]);
+    assert_eq!(entries[2].data_raw.as_deref(), Some(&[7u8, 0, 0, 0, 0][..]));
+
+    // a hive without any of them
+    let empty = Tree::default().hive("ROOT");
+    assert!(feature_usage(&empty).is_none() && recent_apps(&empty).is_none());
+    assert!(taskband(&empty).is_none() && programs_cache(&empty).is_none());
+}
+
 fn unhex(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)
@@ -4863,4 +5163,67 @@ fn sevenzip_history_validates_the_registry_type() {
             .iter()
             .any(|t| !t.problems.is_empty() && t.data_raw.is_some())
     );
+}
+
+#[test]
+fn programs_cache_reports_a_missing_first_item() {
+    use ys_registry_parser::ntuser::programs_cache;
+    let mut cache = vec![1, 0, 0, 0, 0, 0, 0, 0];
+    cache.push(0); // another item follows, but no item is present
+    let mut t = Tree::default();
+    t.set(
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage2",
+        "ProgramsCache",
+        3,
+        &cache,
+    );
+    let (entries, _) = programs_cache(&t.hive("ROOT")).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("list follows"))
+    );
+    assert_eq!(entries[0].data_raw.as_ref(), Some(&cache));
+}
+
+#[test]
+fn recent_apps_keep_malformed_value_bytes() {
+    use ys_registry_parser::ntuser::{RECENT_APPS, recent_apps};
+    for (name, kind, bytes) in [
+        ("LaunchCount", 4, vec![1, 2]),
+        ("AppPath", 1, vec![b'A', 0, 0xff]),
+    ] {
+        let mut t = Tree::default();
+        t.set(&format!(r"{RECENT_APPS}\{{APP}}"), name, kind, &bytes);
+        let (entries, _) = recent_apps(&t.hive("ROOT")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].data_raw.as_ref(), Some(&bytes));
+        assert!(entries[0].problems.iter().any(|p| p.contains(name)));
+    }
+}
+
+#[test]
+fn taskbar_and_programs_cache_validate_binary_types() {
+    use ys_registry_parser::ntuser::{TASKBAND, programs_cache, taskband};
+    let mut t = Tree::default();
+    t.set(TASKBAND, "Favorites", 1, &[0xff]);
+    t.set(
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage2",
+        "ProgramsCache",
+        1,
+        &[1, 0, 0, 0, 0, 0, 0, 0, 2],
+    );
+    let hive = t.hive("ROOT");
+    for (entries, _) in [taskband(&hive).unwrap(), programs_cache(&hive).unwrap()] {
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0]
+                .problems
+                .iter()
+                .any(|p| p.contains("REG_SZ, not REG_BINARY"))
+        );
+        assert!(entries[0].data_raw.is_some());
+    }
 }

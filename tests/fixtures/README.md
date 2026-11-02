@@ -5,6 +5,7 @@
 | `regipy/SAM.gz`, `SECURITY.gz`, `BCD.gz`, `NTUSER.DAT.gz` | [regipy](https://github.com/mkorman90/regipy) `regipy_tests/data/` (c6de929): `SAM.xz`, `SECURITY.xz`, `BCD.xz`, `NTUSER.DAT.xz`, recompressed with gzip | MIT, `regipy/LICENSE` |
 | `regipy/transactions_NTUSER.DAT.gz`, `transactions_ntuser.dat.log1.gz`, `transactions_ntuser.dat.log2.gz` | the same: a dirty `NTUSER.DAT` and its new-format logs | MIT, `regipy/LICENSE` |
 | `regipy/UsrClass.dat.gz`, `UsrClass.dat.LOG1.gz`, `UsrClass.dat.LOG2.gz` | the same: a dirty `UsrClass.dat` and its new-format logs | MIT, `regipy/LICENSE` |
+| `regipy/NTUSER_BAGMRU.DAT.gz` | the same: `NTUSER_BAGMRU.DAT.xz`, a Windows 10 `NTUSER.DAT` with every kind of `FeatureUsage` count | MIT, `regipy/LICENSE` |
 | `regipy/NTUSER-WSL.DAT.gz` | the same: `NTUSER-WSL.DAT.xz`, a Windows 10 `NTUSER.DAT` with three WSL distributions, App Paths and a user's `Uninstall` entry | MIT, `regipy/LICENSE` |
 | `regipy/SYSTEM.gz` | the same: `SYSTEM.xz`, a 32-bit Windows 7 `SYSTEM` hive with two control sets (`Select\Current` 1, `LastKnownGood` 2) | MIT, `regipy/LICENSE` |
 | `museum/w10_apt_NTUSER.DAT.gz`, `w10_apt_ntuser.dat.LOG1.gz`, `w10_apt_ntuser.dat.LOG2.gz` | the [DFIR Artifact Museum](https://github.com/AndrewRathbun/DFIRArtifactMuseum)'s `Windows/Registry/Win10/APTSimulatorVM/APTSimulatorVM_RegistryHives.7z`: `TestUser`'s dirty `NTUSER.DAT` and its new-format logs, gzipped (byte-identical to the archive's), with the Sysinternals keys PsExec and Sysmon left | MIT, `museum/LICENSE` |

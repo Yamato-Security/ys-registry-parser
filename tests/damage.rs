@@ -13,6 +13,9 @@ use ys_registry_parser::ntuser::{
     classes_sid, mui_cache, profile_name, recent_docs, user_assist, user_assist_data,
     user_assist_settings,
 };
+use ys_registry_parser::ntuser::{
+    feature_usage, feature_usage_created, programs_cache, recent_apps, taskband,
+};
 use ys_registry_parser::persistence::{self, MachineClasses};
 use ys_registry_parser::remote_access::{
     connections, host_key_blob, host_key_fingerprint, host_key_name, mount_point_share, mru_list,
@@ -188,6 +191,8 @@ fn read_all(data: Vec<u8>) {
     let _ = (system_info::software(&hive), machine_sid(&hive));
     let _ = domains(&hive);
     let machine = MachineClasses::read(&hive);
+    let _ = (feature_usage(&hive), feature_usage_created(&hive));
+    let _ = (recent_apps(&hive), taskband(&hive), programs_cache(&hive));
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
     let _ = (
@@ -405,4 +410,28 @@ proptest! {
         let _ = (mount_point_share(&text), mru_list(&text));
     }
 
+}
+
+/// The Windows 10 NTUSER.DAT with every kind of `FeatureUsage` count and packaged apps pinned,
+/// unpacked once.
+fn ntuser_win10() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| fixture("NTUSER_BAGMRU.DAT"))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Explorer's use counts, recent apps, pins and programs cache damaged: read without a panic.
+    #[test]
+    fn a_damaged_explorer_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(ntuser_win10().to_vec(), flips), &[])
+        {
+            let _ = (feature_usage(&hive), recent_apps(&hive));
+            let _ = (taskband(&hive), programs_cache(&hive));
+        }
+    }
 }
