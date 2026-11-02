@@ -52,3 +52,8 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `mru` (`mru_lists`, `MruEntry`, `MruList`, `acmru_search`): most-recently-used lists in
+  `NTUSER.DAT`: `RunMRU`, `TypedPaths`, `WordWheelQuery`, `TypedURLs` with `TypedURLsTime`,
+  Paint's and WordPad's recent files, and Windows XP's `ACMru`, each entry in its list's order.
+  `ntuser::mru_items` and `ntuser::mru_list_items` order a key's values by its `MRUListEx` or
+  `MRUList`. (@YamatoSecurity)

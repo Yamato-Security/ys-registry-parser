@@ -435,10 +435,57 @@ pub fn recent_docs(hive: &Hive) -> Option<(Vec<RecentDocs>, Vec<String>)> {
 
 /// The recent documents of one key.
 fn recent_docs_of(key: &Key, extension: Option<String>) -> RecentDocs {
+    let (ordered, list_replayed, problems) = mru_items(key, &[]);
+    let items = ordered
+        .into_iter()
+        .map(|m| match m.value {
+            Some(value) => {
+                let mut doc = item(&value, m.n, m.position, list_replayed);
+                if let Some(problem) = m.problem {
+                    doc.problems.insert(0, problem);
+                }
+                doc
+            }
+            None => RecentDoc {
+                mru_position: m.position,
+                value_index: m.n,
+                replayed: list_replayed,
+                problems: m.problem.into_iter().collect(),
+                ..RecentDoc::default()
+            },
+        })
+        .collect();
+    RecentDocs {
+        extension,
+        last_written: key.last_written(),
+        items,
+        problems,
+    }
+}
+
+/// One numbered value of an MRU key (`RecentDocs`, `BagMRU`, …): where `MRUListEx` puts it.
+pub(crate) struct MruItem<'h> {
+    /// Its place in `MRUListEx` (0: the most recent); `None` when the list doesn't have it.
+    pub(crate) position: Option<u32>,
+    /// Its number: the value's name.
+    pub(crate) n: u32,
+    /// The value; `None` when `MRUListEx` lists a number no value has.
+    pub(crate) value: Option<Value<'h>>,
+    /// Why it is out of the list, or missing.
+    pub(crate) problem: Option<String>,
+}
+
+/// The numbered values of `key` in the order of its `MRUListEx`, then those it doesn't list;
+/// whether that list came from the transaction logs; and what is wrong with the key's values.
+/// Values named in `others` are expected besides the numbered ones (`NodeSlot`, …).
+pub(crate) fn mru_items<'h>(
+    key: &Key<'h>,
+    others: &[&str],
+) -> (Vec<MruItem<'h>>, bool, Vec<String>) {
     let (values, mut problems) = key.values();
     let mut order: Option<(Vec<u32>, bool)> = None;
-    let mut numbered: Vec<(u32, &Value)> = Vec::new();
-    for value in &values {
+    let mut numbered: Vec<(u32, Value<'h>)> = Vec::new();
+    for value in values {
         let name = value.name();
         if name.eq_ignore_ascii_case("MRUListEx") {
             let (bytes, problem) = value.read_data();
@@ -478,7 +525,7 @@ fn recent_docs_of(key: &Key, extension: Option<String>) -> RecentDocs {
                 problems.push(format!("numbered value {n} is present more than once"));
             }
             numbered.push((n, value));
-        } else {
+        } else if !others.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
             problems.push(format!("value {name:?} is not a numbered item"));
         }
     }
@@ -500,35 +547,37 @@ fn recent_docs_of(key: &Key, extension: Option<String>) -> RecentDocs {
         {
             Some((at, (_, value))) => {
                 used.insert(at);
-                items.push(item(value, n, position, list_replayed));
+                items.push(MruItem {
+                    position,
+                    n,
+                    value: Some(*value),
+                    problem: None,
+                });
             }
-            None => items.push(RecentDoc {
-                mru_position: position,
-                value_index: n,
-                replayed: list_replayed,
-                problems: vec![format!("MRUListEx lists value {n}, which is not there")],
-                ..RecentDoc::default()
+            None => items.push(MruItem {
+                position,
+                n,
+                value: None,
+                problem: Some(format!("MRUListEx lists value {n}, which is not there")),
             }),
         }
     }
     for (at, (n, value)) in numbered.iter().enumerate() {
         if !used.contains(&at) {
-            let mut doc = item(value, *n, None, list_replayed);
             let problem = if order_set.contains(n) {
                 format!("another value named {n} already occupies its MRUListEx position")
             } else {
                 "MRUListEx doesn't list it".to_owned()
             };
-            doc.problems.insert(0, problem);
-            items.push(doc);
+            items.push(MruItem {
+                position: None,
+                n: *n,
+                value: Some(*value),
+                problem: Some(problem),
+            });
         }
     }
-    RecentDocs {
-        extension,
-        last_written: key.last_written(),
-        items,
-        problems,
-    }
+    (items, list_replayed, problems)
 }
 
 /// The recent document in value `n`.
@@ -550,6 +599,126 @@ fn item(value: &Value, n: u32, position: Option<u32>, list_replayed: bool) -> Re
         replayed: list_replayed || value.status() == Status::Replayed,
         problems,
     }
+}
+
+/// One lettered value of an MRU key ordered by `MRUList` (`RunMRU`, Windows XP's `OpenSaveMRU`,
+/// …): where the list puts it.
+pub(crate) struct MruLetter<'h> {
+    /// Its place in `MRUList` (0: the most recent); `None` when the list doesn't have it.
+    pub(crate) position: Option<u32>,
+    /// Its letter: the value's name.
+    pub(crate) letter: char,
+    /// The value; `None` when `MRUList` lists a letter no value has.
+    pub(crate) value: Option<Value<'h>>,
+    /// Why it is out of the list, or missing.
+    pub(crate) problem: Option<String>,
+}
+
+/// The lettered values of `key` (`a`, `b`, …) in the order of its `MRUList`, a string of their
+/// letters with the most recent first, then those it doesn't list; whether that list came from
+/// the transaction logs; and what is wrong with the key's values. Letters match in any case, as
+/// value names do. Values named in `others` are expected besides the lettered ones.
+pub(crate) fn mru_list_items<'h>(
+    key: &Key<'h>,
+    others: &[&str],
+) -> (Vec<MruLetter<'h>>, bool, Vec<String>) {
+    let (values, mut problems) = key.values();
+    let mut order: Option<(Vec<char>, bool)> = None;
+    let mut lettered: Vec<(char, Value<'h>)> = Vec::new();
+    let same = |a: char, b: char| a == b || a.to_lowercase().eq(b.to_lowercase());
+    for value in values {
+        let name = value.name();
+        let mut chars = name.chars();
+        if name.eq_ignore_ascii_case("MRUList") {
+            let (bytes, problem) = value.read_data();
+            if let Some(why) = problem {
+                problems.push(format!("MRUList: {why}"));
+            }
+            if !matches!(value.value_type(), ValueType::Sz | ValueType::ExpandSz) {
+                problems.push(format!(
+                    "MRUList: is {}, not REG_SZ",
+                    value.value_type().name()
+                ));
+            }
+            let units = utf16_units(&bytes);
+            let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+            if units[end..].iter().any(|&u| u != 0) {
+                problems.push("MRUList: characters past its NUL".to_owned());
+            }
+            let mut list = Vec::new();
+            for c in char::decode_utf16(units[..end].iter().copied()) {
+                let Ok(c) = c else {
+                    problems.push("MRUList: not valid UTF-16".to_owned());
+                    continue;
+                };
+                if list.iter().any(|&l| same(l, c)) {
+                    problems.push(format!("MRUList: {c} is listed twice"));
+                } else {
+                    list.push(c);
+                }
+            }
+            if order.is_some() {
+                problems.push("MRUList is present more than once".to_owned());
+            } else {
+                order = Some((list, value.status() == Status::Replayed));
+            }
+        } else if let (Some(letter), None) = (chars.next(), chars.next()) {
+            if lettered.iter().any(|(other, _)| same(*other, letter)) {
+                problems.push(format!("lettered value {letter} is present more than once"));
+            }
+            lettered.push((letter, value));
+        } else if !others.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
+            problems.push(format!("value {name:?} is not a lettered item"));
+        }
+    }
+    let (order, list_replayed) = order.unwrap_or_else(|| {
+        if !lettered.is_empty() {
+            problems.push("it has no MRUList: its items' order is unknown".to_owned());
+        }
+        (Vec::new(), false)
+    });
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut items = Vec::new();
+    for (position, &letter) in order.iter().enumerate() {
+        let position = u32::try_from(position).ok();
+        match lettered
+            .iter()
+            .enumerate()
+            .find(|(at, (l, _))| same(*l, letter) && !used.contains(at))
+        {
+            Some((at, (l, value))) => {
+                used.insert(at);
+                items.push(MruLetter {
+                    position,
+                    letter: *l,
+                    value: Some(*value),
+                    problem: None,
+                });
+            }
+            None => items.push(MruLetter {
+                position,
+                letter,
+                value: None,
+                problem: Some(format!("MRUList lists value {letter}, which is not there")),
+            }),
+        }
+    }
+    for (at, (letter, value)) in lettered.iter().enumerate() {
+        if !used.contains(&at) {
+            let problem = if order.iter().any(|&l| same(l, *letter)) {
+                format!("another value named {letter} already occupies its MRUList position")
+            } else {
+                "MRUList doesn't list it".to_owned()
+            };
+            items.push(MruLetter {
+                position: None,
+                letter: *letter,
+                value: Some(*value),
+                problem: Some(problem),
+            });
+        }
+    }
+    (items, list_replayed, problems)
 }
 
 /// The name of the profile folder an `NTUSER.DAT` belongs to (`alice` for `C:\Users\alice`),

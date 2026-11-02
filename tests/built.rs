@@ -1836,3 +1836,279 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
 }
+
+/// An MRU entry's list, subkey, place, value name, value, typed time and problems.
+type MruLine<'a> = (
+    &'static str,
+    Option<&'a str>,
+    Option<u32>,
+    &'a str,
+    Option<&'a str>,
+    Option<u64>,
+    Vec<String>,
+);
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn mru_lists_of_each_layout() {
+    use ys_registry_parser::mru::{MruList, mru_lists};
+    let explorer = r"Software\Microsoft\Windows\CurrentVersion\Explorer";
+    let run = format!(r"{explorer}\RunMRU");
+    let paths = format!(r"{explorer}\TypedPaths");
+    let words = format!(r"{explorer}\WordWheelQuery");
+    let urls = r"Software\Microsoft\Internet Explorer\TypedURLs";
+    let times = r"Software\Microsoft\Internet Explorer\TypedURLsTime";
+    let paint = MruList::Paint.key_path();
+    let acmru = r"Software\Microsoft\Search Assistant\ACMru";
+    let term = |t: &str| utf16z(t);
+    let mut t = Tree::default();
+    // RunMRU: a command without its \1, a letter listed but missing
+    t.sz(&run, "MRUList", "bca")
+        .sz(&run, "a", r"cmd\1")
+        .sz(&run, "b", r"\\server\share\1")
+        .sz(&run, "c", "notepad")
+        .sz(&run, "MRUList", "a")
+        // TypedPaths: by number; a name that isn't one, a number written differently
+        .sz(&paths, "url2", r"C:\Temp")
+        .sz(&paths, "url1", r"D:\Evidence")
+        .sz(&paths, "url02", r"C:\Other")
+        .sz(&paths, "", "default")
+        // WordWheelQuery: MRUListEx; a term cut short, a term of the wrong type
+        .set(&words, "MRUListEx", 3, &mru(&[1, 0, 2]))
+        .set(&words, "0", 3, &term("password"))
+        .set(&words, "1", 3, &term("invoice")[..6])
+        .sz(&words, "2", "budget")
+        // TypedURLs with TypedURLsTime: a time of 4 bytes, a time without its address
+        .sz(urls, "url1", "http://example.com/")
+        .sz(urls, "url2", "http://example.org/")
+        .set(times, "url1", 3, &WHEN.to_le_bytes())
+        .set(times, "url2", 3, &[1, 2, 3, 4])
+        .set(times, "url3", 3, &(WHEN - 5).to_le_bytes())
+        // Paint's recent files, out of order
+        .sz(&paint, "File2", r"C:\b.png")
+        .sz(&paint, "File1", r"C:\a.png")
+        // ACMru: two kinds of search
+        .sz(&format!(r"{acmru}\5603"), "001", "secret")
+        .sz(&format!(r"{acmru}\5603"), "000", "*.kdbx")
+        .sz(&format!(r"{acmru}\5604"), "000", "password");
+    let hive = t.hive("ROOT");
+    let (entries, problems) = mru_lists(&hive).unwrap();
+    assert_eq!(
+        problems,
+        [
+            format!("{run}: MRUList is present more than once"),
+            format!(r#"{paths}: value "url02" is not a numbered item (url1)"#),
+            format!(r#"{paths}: value "" is not a numbered item (url1)"#),
+        ]
+    );
+    let got: Vec<MruLine> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.list.name(),
+                e.subkey.as_deref(),
+                e.mru_position,
+                e.value_name.as_str(),
+                e.value.as_deref(),
+                e.typed_time,
+                e.problems.clone(),
+            )
+        })
+        .collect();
+    let none = Vec::new;
+    let one = |p: &str| vec![p.to_owned()];
+    assert_eq!(
+        got,
+        [
+            (
+                "RunMRU",
+                None,
+                Some(0),
+                "b",
+                Some(r"\\server\share"),
+                None,
+                none()
+            ),
+            ("RunMRU", None, Some(1), "c", Some("notepad"), None, none()),
+            ("RunMRU", None, Some(2), "a", Some("cmd"), None, none()),
+            (
+                "TypedPaths",
+                None,
+                Some(0),
+                "url1",
+                Some(r"D:\Evidence"),
+                None,
+                none()
+            ),
+            (
+                "TypedPaths",
+                None,
+                Some(1),
+                "url2",
+                Some(r"C:\Temp"),
+                None,
+                none()
+            ),
+            (
+                "WordWheelQuery",
+                None,
+                Some(0),
+                "1",
+                None,
+                None,
+                one("its term has no NUL: the data is cut short")
+            ),
+            (
+                "WordWheelQuery",
+                None,
+                Some(1),
+                "0",
+                Some("password"),
+                None,
+                none()
+            ),
+            (
+                "WordWheelQuery",
+                None,
+                Some(2),
+                "2",
+                Some("budget"),
+                None,
+                one("is REG_SZ, not REG_BINARY")
+            ),
+            (
+                "TypedURLs",
+                None,
+                Some(0),
+                "url1",
+                Some("http://example.com/"),
+                Some(WHEN),
+                none()
+            ),
+            (
+                "TypedURLs",
+                None,
+                Some(1),
+                "url2",
+                Some("http://example.org/"),
+                None,
+                one("TypedURLsTime: 4 bytes, not the 8 of a FILETIME (01020304)")
+            ),
+            (
+                "Paint",
+                None,
+                Some(0),
+                "File1",
+                Some(r"C:\a.png"),
+                None,
+                none()
+            ),
+            (
+                "Paint",
+                None,
+                Some(1),
+                "File2",
+                Some(r"C:\b.png"),
+                None,
+                none()
+            ),
+            (
+                "ACMru",
+                Some("5603"),
+                Some(0),
+                "000",
+                Some("*.kdbx"),
+                None,
+                none()
+            ),
+            (
+                "ACMru",
+                Some("5603"),
+                Some(1),
+                "001",
+                Some("secret"),
+                None,
+                none()
+            ),
+            (
+                "ACMru",
+                Some("5604"),
+                Some(0),
+                "000",
+                Some("password"),
+                None,
+                none()
+            ),
+            (
+                "TypedURLs",
+                None,
+                Some(2),
+                "url3",
+                None,
+                Some(WHEN - 5),
+                one("TypedURLs has no url3: only its time is there")
+            ),
+        ]
+    );
+    // what doesn't decode keeps its bytes
+    assert_eq!(entries[5].data_raw.as_deref(), Some(&term("invoice")[..6]));
+    assert_eq!(entries[7].data_raw.as_deref(), Some(&utf16z("budget")[..]));
+    // a time that isn't one is a problem of its address, whose own bytes decode
+    assert!(entries[6].data_raw.is_none() && entries[9].data_raw.is_none());
+    assert_eq!(entries[12].key_path, format!(r"{acmru}\5603"));
+    assert_eq!(entries[15].key_path, times);
+    assert!(
+        entries
+            .iter()
+            .all(|e| e.key_last_written > 0 && !e.replayed)
+    );
+    // a hive with none of the keys; one with only TypedURLsTime
+    assert!(mru_lists(&Tree::default().hive("ROOT")).is_none());
+    let mut t = Tree::default();
+    t.set(times, "url1", 3, &WHEN.to_le_bytes());
+    let (entries, _) = mru_lists(&t.hive("ROOT")).unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+#[test]
+fn run_mru_lists_that_dont_add_up() {
+    use ys_registry_parser::mru::mru_lists;
+    let run = r"Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU";
+    // a letter listed twice, in another case; a list past its NUL; a value that isn't a letter
+    let mut list = utf16z("bAa");
+    list.extend(utf16z("z"));
+    let mut t = Tree::default();
+    t.set(run, "MRUList", 1, &list)
+        .sz(run, "a", r"cmd\1")
+        .sz(run, "b", r"calc\1")
+        .sz(run, "extra", "x");
+    let (entries, problems) = mru_lists(&t.hive("ROOT")).unwrap();
+    assert_eq!(
+        problems,
+        [
+            format!("{run}: MRUList: characters past its NUL"),
+            format!("{run}: MRUList: a is listed twice"),
+            format!(r#"{run}: value "extra" is not a lettered item"#),
+        ]
+    );
+    let got: Vec<(Option<u32>, &str, Option<&str>)> = entries
+        .iter()
+        .map(|e| (e.mru_position, e.value_name.as_str(), e.value.as_deref()))
+        .collect();
+    assert_eq!(
+        got,
+        [(Some(0), "b", Some("calc")), (Some(1), "a", Some("cmd"))]
+    );
+    // no MRUList: the order is unknown
+    let mut t = Tree::default();
+    t.sz(run, "a", r"cmd\1");
+    let (entries, problems) = mru_lists(&t.hive("ROOT")).unwrap();
+    assert_eq!(
+        problems,
+        [format!(
+            "{run}: it has no MRUList: its items' order is unknown"
+        )]
+    );
+    assert_eq!(entries[0].problems, ["MRUList doesn't list it"]);
+    assert_eq!(entries[0].mru_position, None);
+}

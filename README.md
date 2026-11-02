@@ -57,6 +57,14 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   `FailureActions` value (`SERVICE_FAILURE_ACTIONS`: reset period, whether a reboot message and a
   command are set, then each action and its delay); `start_name`, `type_names` and
   `error_control_name` name the numbers.
+- Most-recently-used lists in `NTUSER.DAT` (`mru`): `mru_lists` gives every entry of `RunMRU`
+  (lettered values in `MRUList` order, each command without its trailing `\1`), `TypedPaths`,
+  `WordWheelQuery` (UTF-16 search terms in `MRUListEx` order), Internet Explorer's `TypedURLs`
+  with each address's time from `TypedURLsTime`, Paint's and WordPad's `Recent File List`, and
+  Windows XP's `Search Assistant\ACMru` (a subkey per kind of search, `acmru_search`), in list
+  order (`url1`, `File1` and `000` are the most recent), with the key's last-write time (which
+  dates its most recent entry only). Values a list names but the key hasn't, values it doesn't
+  name, and data that doesn't decode (kept as its bytes) are reported.
 - `NTUSER.DAT` hives (`ntuser`): Explorer's recent documents (`recent_docs`), from `RecentDocs`
   and each of its subkeys (one per extension, and `Folder`): every item in the order of the key's
   `MRUListEx` (`mru_list_ex`), its name, and the name of its shortcut in the `Recent` folder (the
@@ -191,6 +199,14 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   Museum's, the dirty ones with their logs; 593 items): the same order, names and shortcut names
   as a reader built on yarp and [libfwsi](https://github.com/libyal/libfwsi)'s shell item
   parser.
+- Most-recently-used lists on the 25 public `NTUSER.DAT` hives with them (regipy's, Plaso's,
+  notatin's, artemis' and the DFIR Artifact Museum's, Windows XP to 11): the same `RunMRU` (60),
+  `TypedPaths` (65), `WordWheelQuery` (59) and `TypedURLs` (80) entries in the same order as
+  Plaso's `mrulist`, `mrulistex` and `typedurls` and regipy's `runmru`, `typed_paths`,
+  `word_wheel_query` and `typed_urls` (but for one address regipy cuts at 256 characters, and one
+  in artemis' damaged hive, which Plaso stops reading), the same 41 `TypedURLsTime` times as
+  Plaso's `typedurlstime`, to the 100 ns, and the same Paint (14), WordPad (5) and `ACMru` (43)
+  values as regipy reads.
 - UserAssist on 12 public `NTUSER.DAT` hives (regipy's, Plaso's, notatin's and the DFIR Artifact
   Museum's, Windows XP to 11; 641 items): the same items, run counts, focus counts, focus times
   and last-run times as Plaso's `userassist`; the same as regipy's `user_assist` too, but for its
@@ -222,8 +238,11 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   with their paths); hives built with every kind of list, big data, damage, a loop, a lost root,
   and deleted keys under keys in use, deleted or lost; the replay on built logs; regipy's `SYSTEM`
   (control sets, computer name, services) and `NTUSER.DAT` (recent documents, profile,
-  UserAssist, and its dirty `NTUSER.DAT` with the items its logs add); UserAssist built with both
-  versions, a value of another size, a version that disagrees with the key's, an unknown GUID,
+  UserAssist, search terms and typed addresses, and its dirty `NTUSER.DAT` with the items its logs
+  add, `RunMRU` among them); Plaso's `NTUSER.DAT` (typed addresses and their times); MRU lists
+  built in each layout with values missing, unlisted, misnamed, of the wrong type or cut short,
+  times that aren't 8 bytes or have no address, and `MRUList`s that repeat a letter; UserAssist
+  built with both versions, a value of another size, a version that disagrees with the key's, an unknown GUID,
   session entries and `NoEncrypt`; recent
   documents whose list and values don't add up; a task cache built with real Windows 11 `Actions`
   and `DynamicInfo`, a task without its `SD`, a `Tree` entry without its `Tasks` key and the other
@@ -245,4 +264,5 @@ data cells the entry didn't write.
 Apache-2.0 (`LICENSE`). The transaction log replay comes from Yamato Security's
 [ys-shimcache-parser](https://github.com/Yamato-Security/ys-shimcache-parser) (Apache-2.0). The
 format is Maxim Suhanov's [Windows registry file format specification](https://github.com/msuhanov/regf)
-(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`).
+(CC BY 4.0). The test hives are regipy's, under the MIT licence (`tests/fixtures/regipy/LICENSE`),
+and Plaso's, under the Apache License 2.0 (`tests/fixtures/plaso/LICENSE`).
