@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
@@ -35,6 +36,12 @@ fn system() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// regipy's `NTUSER-WSL.DAT`, with WSL distributions and App Paths, unpacked once.
+fn ntuser_wsl() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| fixture("NTUSER-WSL.DAT"))
 }
 
 /// Flip bytes of `data` past its base block.
@@ -68,6 +75,7 @@ fn read_all(data: Vec<u8>) {
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
+    let _ = (installed::software(&hive), installed::ntuser(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -108,6 +116,20 @@ proptest! {
         read_all(damage(system().to_vec(), flips));
     }
 
+    /// Installed software's keys and values damaged: read without a panic.
+    #[test]
+    fn damaged_installed_software(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(ntuser_wsl().to_vec(), flips), &[])
+        {
+            for program in installed::ntuser(&hive).0 {
+                let _ = program.key_path.rsplit('\\').next().map(package_name);
+            }
+        }
+    }
+
     #[test]
     fn a_damaged_ntuser_hive(
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
@@ -138,5 +160,8 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let text = String::from_utf8_lossy(&rest);
+        let _ = (unpack_guid(&text), install_date(&text), package_name(&text));
+        let _ = msi_version(u32::from_le_bytes([version as u8, 0, 0, rest.len() as u8]));
     }
 }

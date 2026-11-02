@@ -5,6 +5,7 @@
 
 use std::fmt::Write as _;
 
+use ys_registry_parser::installed::{self, Program, ProgramSource, Scope};
 use ys_registry_parser::ntuser::{
     classes_sid, recent_docs, rot13, user_assist, user_assist_settings,
 };
@@ -1835,4 +1836,272 @@ fn user_assist_names_without_rot13_and_times_out_of_range() {
     );
     assert_eq!(entries[1].data_raw.as_deref(), Some(&corrupt[..]));
     assert_eq!(entries[1].run_count, Some(1));
+}
+
+/// Each program as `source scope key | name version | date | location | source`, with what
+/// else is set.
+fn programs(records: &[Program]) -> Vec<String> {
+    let text = |t: &Option<String>| t.clone().unwrap_or_else(|| "-".to_owned());
+    records
+        .iter()
+        .map(|p| {
+            let mut line = format!(
+                "{} {} {} | {} {} | {} | {} | {}",
+                p.source.name(),
+                p.scope.name(),
+                p.key_path.rsplit('\\').next().unwrap(),
+                text(&p.name),
+                text(&p.version),
+                text(&p.install_date),
+                text(&p.install_location),
+                text(&p.install_source),
+            );
+            for (k, v) in &p.details {
+                let _ = write!(line, " {k}={v}");
+            }
+            if let Some(a) = &p.architecture {
+                let _ = write!(line, " arch={a}");
+            }
+            if let Some(sid) = &p.user_sid {
+                let _ = write!(line, " sid={sid}");
+            }
+            for (name, _) in &p.data_raw {
+                let _ = write!(line, " raw:{name}");
+            }
+            for problem in &p.problems {
+                let _ = write!(line, " [{problem}]");
+            }
+            line
+        })
+        .collect()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn installed_software_of_a_software_hive() {
+    let cv = r"Microsoft\Windows\CurrentVersion";
+    let msi = format!(r"{cv}\Uninstall\{{8E9D8F3C-6B7A-4D5C-3E2F-1A0B9C8D7E6F}}");
+    let tool = format!(r"{cv}\Uninstall\Tool");
+    let old = format!(r"Wow6432Node\{cv}\Uninstall\Old32");
+    let product = r"Classes\Installer\Products\c3f8d9e8a7b6c5d4e3f2a1b0c9d8e7f6";
+    let bad_product = r"Classes\Installer\Products\NotPacked";
+    let store = format!(r"{cv}\Appx\AppxAllUserStore");
+    let calc = "Microsoft.WindowsCalculator_10.1906.55.0_x64__8wekyb3d8bbwe";
+    let user = "S-1-5-21-1-2-3-1001";
+    let mut lossy = utf16z("Tool");
+    lossy.splice(2..2, [0x00, 0xd8]);
+    let mut t = Tree::default();
+    t.sz(&msi, "DisplayName", "Agent")
+        .sz(&msi, "DisplayVersion", "2.1.0")
+        .sz(&msi, "Publisher", "Example Corp")
+        .sz(&msi, "InstallDate", "20220208")
+        .sz(&msi, "InstallLocation", r"C:\Program Files\Agent\")
+        .sz(&msi, "InstallSource", r"C:\Users\alice\Downloads\")
+        .sz(
+            &msi,
+            "UninstallString",
+            "MsiExec.exe /X{8E9D8F3C-6B7A-4D5C-3E2F-1A0B9C8D7E6F}",
+        )
+        .dword(&msi, "EstimatedSize", 2048)
+        .dword(&msi, "SystemComponent", 0)
+        .dword(&msi, "WindowsInstaller", 1)
+        .sz(&msi, "Inno Setup: User", "alice")
+        // damaged or unusual: a date written otherwise, a size as text, an empty flag, a name
+        // that isn't valid UTF-16
+        .set(&tool, "DisplayName", 1, &lossy)
+        .sz(&tool, "InstallDate", "2022-02-08")
+        .sz(&tool, "EstimatedSize", "12")
+        .sz(&tool, "SystemComponent", "")
+        .sz(
+            &tool,
+            "QuietUninstallString",
+            r#""C:\Tool\unins000.exe" /SILENT"#,
+        )
+        .sz(&tool, "InstallLocation", "")
+        .sz(&old, "DisplayName", "Old 32-bit")
+        .dword(&old, "SystemComponent", 1)
+        .sz(product, "ProductName", "Agent")
+        .dword(product, "Version", 0x0201_0000)
+        .sz(product, "PackageCode", "1d5c3b2a4f6e8d7c9b0a1f2e3d4c5b6a")
+        .sz(
+            &format!(r"{product}\SourceList"),
+            "PackageName",
+            "agent.msi",
+        )
+        .sz(
+            &format!(r"{product}\SourceList"),
+            "LastUsedSource",
+            r"n;1;C:\Users\alice\Downloads\",
+        )
+        .sz(bad_product, "ProductName", "Unpacked")
+        .sz(
+            &format!(r"{bad_product}\SourceList"),
+            "LastUsedSource",
+            r"C:\setup\",
+        )
+        .sz(
+            &format!(r"{cv}\App Paths\tool.exe"),
+            "",
+            r"C:\Tool\tool.exe",
+        )
+        .sz(&format!(r"{cv}\App Paths\tool.exe"), "Path", r"C:\Tool")
+        .sz(
+            &format!(r"Wow6432Node\{cv}\App Paths\old.exe"),
+            "",
+            r"C:\Old\old.exe",
+        )
+        .sz(
+            &format!(r"{store}\Applications\{calc}"),
+            "Path",
+            r"C:\Program Files\WindowsApps\x",
+        )
+        .at(&format!(r"{store}\Applications\NotAPackage"));
+    t.at(&format!(
+        r"{store}\InboxApplications\Microsoft.Windows.Search_1.14.0.19041_neutral_neutral_cw5n1h2txyewy"
+    ));
+    t.at(&format!(
+        r"{store}\Deprovisioned\Microsoft.BingNews_8wekyb3d8bbwe"
+    ));
+    t.at(&format!(r"{store}\Config\Microsoft.BingNews_8wekyb3d8bbwe"));
+    t.at(&format!(
+        r"{store}\{user}\Tool.Package_1.0.0.0_arm64_en-us_abcdefghijkmn"
+    ));
+    t.at(&format!(r"{store}\EndOfLife\{user}\{calc}"));
+    let hive = t.hive("ROOT");
+    let (records, problems) = installed::software(&hive);
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        programs(&records),
+        [
+            r"uninstall machine {8E9D8F3C-6B7A-4D5C-3E2F-1A0B9C8D7E6F} | Agent 2.1.0 | 2022-02-08 | C:\Program Files\Agent\ | C:\Users\alice\Downloads\ Inno Setup: User=alice",
+            "uninstall machine Tool | T\u{fffd}ool - | - | - | - raw:DisplayName raw:EstimatedSize [DisplayName: is not valid UTF-16: decoded lossily] [EstimatedSize: is REG_SZ, not REG_DWORD]",
+            "uninstall machine Old32 | Old 32-bit - | - | - | - arch=x86",
+            r"msi_product machine c3f8d9e8a7b6c5d4e3f2a1b0c9d8e7f6 | Agent 2.1.0 | - | - | C:\Users\alice\Downloads\ PackageCode={A2B3C5D1-E6F4-C7D8-B9A0-F1E2D3C4B5A6} PackageName=agent.msi",
+            r#"msi_product machine NotPacked | Unpacked - | - | - | - [LastUsedSource: "C:\\setup\\" is not <type>;<index>;<source>]"#,
+            r"app_path machine tool.exe | tool.exe - | - | C:\Tool | -",
+            "app_path machine old.exe | old.exe - | - | - | - arch=x86",
+            r"package machine Microsoft.WindowsCalculator_10.1906.55.0_x64__8wekyb3d8bbwe | Microsoft.WindowsCalculator 10.1906.55.0 | - | C:\Program Files\WindowsApps\x | - List=Applications PublisherId=8wekyb3d8bbwe arch=x64",
+            r#"package machine NotAPackage | - - | - | - | - List=Applications ["NotAPackage" is not a package full name or family name]"#,
+            "package machine Microsoft.Windows.Search_1.14.0.19041_neutral_neutral_cw5n1h2txyewy | Microsoft.Windows.Search 1.14.0.19041 | - | - | - List=InboxApplications ResourceId=neutral PublisherId=cw5n1h2txyewy arch=neutral",
+            "package machine Microsoft.BingNews_8wekyb3d8bbwe | Microsoft.BingNews - | - | - | - List=Deprovisioned PublisherId=8wekyb3d8bbwe",
+            "package user Tool.Package_1.0.0.0_arm64_en-us_abcdefghijkmn | Tool.Package 1.0.0.0 | - | - | - List=User ResourceId=en-us PublisherId=abcdefghijkmn arch=arm64 sid=S-1-5-21-1-2-3-1001",
+            "package user Microsoft.WindowsCalculator_10.1906.55.0_x64__8wekyb3d8bbwe | Microsoft.WindowsCalculator 10.1906.55.0 | - | - | - List=EndOfLife PublisherId=8wekyb3d8bbwe arch=x64 sid=S-1-5-21-1-2-3-1001",
+        ]
+    );
+    let agent = &records[0];
+    assert_eq!(
+        agent.product_code.as_deref(),
+        Some("{8E9D8F3C-6B7A-4D5C-3E2F-1A0B9C8D7E6F}")
+    );
+    assert_eq!(
+        (
+            agent.publisher.as_deref(),
+            agent.size_kb,
+            agent.system_component,
+            agent.windows_installer
+        ),
+        (Some("Example Corp"), Some(2048), Some(false), Some(true))
+    );
+    assert_eq!(agent.key_last_written, WHEN);
+    assert_eq!(agent.key_path, msi);
+    let tool = &records[1];
+    assert_eq!(tool.install_date_raw.as_deref(), Some("2022-02-08"));
+    assert_eq!(tool.data_raw[1].1, utf16z("12"));
+    assert_eq!(tool.data_raw[0].1, lossy);
+    assert_eq!(
+        (tool.system_component, tool.install_location.as_deref()),
+        (None, None)
+    );
+    assert_eq!(
+        tool.quiet_uninstall_command.as_deref(),
+        Some(r#""C:\Tool\unins000.exe" /SILENT"#)
+    );
+    assert!(records[2].wow64 && records[2].system_component == Some(true));
+    assert_eq!(records[2].key_path, old);
+    assert_eq!(
+        records[3].product_code.as_deref(),
+        Some("{8E9D8F3C-6B7A-4D5C-3E2F-1A0B9C8D7E6F}")
+    );
+    assert_eq!(records[4].product_code, None);
+    assert_eq!(records[5].program.as_deref(), Some(r"C:\Tool\tool.exe"));
+    assert!(records[6].wow64 && records[6].program.as_deref() == Some(r"C:\Old\old.exe"));
+    assert!(records.iter().all(|p| !p.replayed));
+    assert!(
+        records
+            .iter()
+            .filter(|p| p.source == ProgramSource::Package)
+            .all(|p| p.scope
+                == if p.user_sid.is_some() {
+                    Scope::User
+                } else {
+                    Scope::Machine
+                })
+    );
+    // the same keys are a user's in NTUSER.DAT only under Software
+    assert_eq!(installed::ntuser(&hive), (Vec::new(), Vec::new()));
+}
+
+#[test]
+fn installed_software_of_an_ntuser_hive() {
+    let cv = r"Software\Microsoft\Windows\CurrentVersion";
+    let lxss = format!(r"{cv}\Lxss");
+    let docker = format!(r"{lxss}\{{36E0AFE5-9CCD-424F-B8C5-F4437FF99040}}");
+    let ubuntu = format!(r"{lxss}\{{70E495E1-D4D3-4B8D-BBE8-79FDC01E50EA}}");
+    let mut t = Tree::default();
+    t.sz(
+        &format!(r"{cv}\Uninstall\Portable"),
+        "DisplayName",
+        "Portable",
+    )
+    .sz(
+        r"Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Old",
+        "DisplayName",
+        "Old",
+    )
+    .sz(
+        r"Software\Microsoft\Installer\Products\00005109110000000000000000F01FEC",
+        "ProductName",
+        "Office",
+    )
+    .sz(&format!(r"{cv}\App Paths\p.exe"), "", r"C:\Users\a\p.exe")
+    .sz(
+        &lxss,
+        "DefaultDistribution",
+        "{70e495e1-d4d3-4b8d-bbe8-79fdc01e50ea}",
+    )
+    .sz(&docker, "DistributionName", "docker-desktop")
+    .dword(&docker, "Flags", 15)
+    .dword(&docker, "Version", 2)
+    .sz(
+        &docker,
+        "BasePath",
+        r"\\?\C:\Users\a\AppData\Local\Docker\wsl\distro",
+    )
+    .sz(&ubuntu, "DistributionName", "Ubuntu")
+    .dword(&ubuntu, "Flags", 7)
+    .sz(&ubuntu, "DefaultUid", "1000")
+    .at(&format!(r"{lxss}\AppxInstallerCache"));
+    let (records, problems) = installed::ntuser(&t.hive("ROOT"));
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        programs(&records),
+        [
+            "uninstall user Portable | Portable - | - | - | -",
+            "uninstall user Old | Old - | - | - | - arch=x86",
+            "msi_product user 00005109110000000000000000F01FEC | Office - | - | - | -",
+            "app_path user p.exe | p.exe - | - | - | -",
+            r"wsl user {36E0AFE5-9CCD-424F-B8C5-F4437FF99040} | docker-desktop 2 | - | \\?\C:\Users\a\AppData\Local\Docker\wsl\distro | - Flags=0xf Version=2",
+            "wsl user {70E495E1-D4D3-4B8D-BBE8-79FDC01E50EA} | Ubuntu 1 | - | - | - Flags=0x7 Default=true raw:DefaultUid [DefaultUid: is REG_SZ, not REG_DWORD]",
+        ]
+    );
+    assert_eq!(
+        records[2].product_code.as_deref(),
+        Some("{90150000-0011-0000-0000-0000000FF1CE}")
+    );
+    assert!(records.iter().all(|p| p.scope == Scope::User));
+    // without Flags, no WSL version
+    let mut t = Tree::default();
+    t.sz(&docker, "DistributionName", "x");
+    let (records, _) = installed::ntuser(&t.hive("ROOT"));
+    assert_eq!((records.len(), records[0].version.as_deref()), (1, None));
 }

@@ -28,6 +28,7 @@ mod bytes;
 mod data;
 mod deleted;
 mod hive;
+pub mod installed;
 mod log;
 pub mod ntuser;
 pub mod persistence;

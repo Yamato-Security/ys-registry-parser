@@ -120,6 +120,22 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
     (`ActivatableClasses\…\DebugInformation`). With the machine's `MachineClasses` (read from
     `SOFTWARE`), each says whether it overrides the machine's registration of the same class or
     command.
+- Installed software (`installed`), one `Program` per key, with its `ProgramSource`, `Scope`
+  (`machine` or `user`), key and last-write time, and the problems its values have (their bytes
+  kept): `software` reads `SOFTWARE`'s `Uninstall` entries (and `Wow6432Node`'s: name, version,
+  publisher, install date written `YYYYMMDD` (`install_date`), folders, uninstall commands, size,
+  `SystemComponent`, `WindowsInstaller`, the product code of an entry named after one, and its
+  `DisplayIcon`, `ParentKeyName`, `ReleaseType` and `Inno Setup: User`), Windows Installer
+  products (`Classes\Installer\Products`: the product code unpacked from the key's name
+  (`unpack_guid`), `ProductName`, `Version` (`msi_version`), `PackageCode`, and the package's
+  name and the folder it was last installed from, from `SourceList`), App Paths (the program and
+  its `Path`, and `Wow6432Node`'s) and packaged apps (`Appx\AppxAllUserStore`'s `Applications`,
+  `InboxApplications`, `Staged`, `Deprovisioned`, each user's `<SID>` and `EndOfLife\<SID>`, each
+  package's name, version, architecture and publisher id from its full name (`package_name`), and
+  its `Path`); `ntuser` reads a user's `Uninstall` entries, Windows Installer products
+  (`Software\Microsoft\Installer\Products`), App Paths and WSL distributions (`Lxss\{GUID}`:
+  `DistributionName`, `BasePath`, the WSL version its `Flags` say, `State`, `DefaultUid`, the file
+  system's `Version`, `PackageFamilyName`, and whether it is the default).
 
 Damage is reported, never a panic: a list, key or value that can't be read is a problem
 (`Key::subkeys`, `Key::values`, `Value::read_data`) and what is next to it is still read; a list
@@ -216,6 +232,16 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `ntuser_persistence`, and the same (none) `AppInit_DLLs` and IFEO debuggers as its
   `appinitdlls` and `image_file_execution_options`; on regipy's `SYSTEM`, the same LSA packages
   as its `lsa_packages`.
+- Installed software on 10 public `SOFTWARE` and 19 public `NTUSER.DAT` hives (regipy's, Plaso's,
+  notatin's, artemis' and the DFIR Artifact Museum's, Windows 7 to 11, Server 2012 R2 and 2022;
+  1,731 records): the same 434 `Uninstall` entries (key, time and every value read) as regipy's
+  `installed_programs_software` and `installed_programs_ntuser`, the same 112 Windows Installer
+  products (key, time, `ProductName`) as its `software_classes_installer` and
+  `ntuser_classes_installer`, the same 244 App Paths (program, `Path`, time) as its `app_paths`,
+  and the same 7 WSL distributions as its `wsl` (which also lists `Lxss`'s `AppxInstallerCache`
+  key as one); the same 913 packages (key, time, `Path`) as a reader built on yarp. regipy
+  doesn't replay transaction logs: on the two dirty hives, with their logs not applied, the
+  records are the same.
 - 2,000 damaged copies of hives and their logs read without a panic, in under 10 ms each.
 - In the tests: regipy's `SAM`, `SECURITY`, `BCD`, `NTUSER.DAT` and its dirty `NTUSER.DAT` and
   `UsrClass.dat` with their logs (counts, values of each type, what the logs changed, deleted keys
@@ -234,7 +260,12 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   without their `Run` value, IFEO `UseFilter` and `GlobalFlag` as a string, `SilentProcessExit`
   with each `ReportingMode` (0, 1, 2, 4, 7, none, unreadable), an Active Setup
   `ShellComponent`, and a user's COM classes and commands that do and don't override the
-  machine's; random damage, and random `Actions`, `F` and `V`.
+  machine's; regipy's `NTUSER-WSL.DAT` (a user's `Uninstall` entry, App Paths and WSL
+  distributions); installed software built with each list, an `InstallDate` not written
+  `YYYYMMDD`, a size written as text, a name that isn't valid UTF-16, a product whose key isn't a
+  packed product code and whose `LastUsedSource` isn't `<type>;<index>;<source>`, deprovisioned
+  and removed packages, a name that isn't a package's, and `Lxss` keys that aren't distributions;
+  random damage, and random `Actions`, `F` and `V`.
   Test data provenance: `tests/fixtures/README.md`.
 
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose

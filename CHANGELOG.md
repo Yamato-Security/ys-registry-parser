@@ -52,3 +52,11 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `installed` (`Program`, `ProgramSource`, `Scope`): installed software, in `SOFTWARE`
+  (`software`: `Uninstall` and `Wow6432Node`'s, Windows Installer products, App Paths, packaged
+  apps of `Appx\AppxAllUserStore`) and `NTUSER.DAT` (`ntuser`: a user's `Uninstall`, Windows
+  Installer products, App Paths and WSL distributions), one record per key with its name,
+  version, publisher, install date, folders, uninstall commands, size, product code and
+  architecture; `unpack_guid` (a Windows Installer packed product code), `msi_version`,
+  `package_name` (a package's full or family name) and `install_date` (`YYYYMMDD`).
+  (@YamatoSecurity)
