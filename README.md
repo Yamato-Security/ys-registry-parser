@@ -244,6 +244,16 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
     (`ActivatableClasses\…\DebugInformation`). With the machine's `MachineClasses` (read from
     `SOFTWARE`), each says whether it overrides the machine's registration of the same class or
     command.
+- Application compatibility data (`appcompat`), one `AppCompatEntry` per program, module use or
+  shim database, with its `AppCompatSource`, key, value and last-write time: `software` reads
+  `SOFTWARE`'s compatibility layers (`AppCompatFlags\Layers` and `Wow6432Node`'s: each program and
+  its layers), `CIT\Module` (each program that loaded a tracked module, and when it last did),
+  `CIT\System`'s databases (LZNT1-compressed, `lznt1`; the program paths and command lines in
+  them), and custom shim databases (`InstalledSDB\{GUID}`: path, description, type and install
+  time; `Custom\<program>`: each database applied to a program, with its install time and path);
+  `ntuser` reads a user's layers and the Program Compatibility Assistant's `Store` (Windows 8 and
+  later; each program, its `SACP` data kept as bytes) and `Persisted` (Windows 7), with the
+  removable media id of `SIGN.MEDIA=` names (`sign_media`).
 - Traces third-party tools leave in `NTUSER.DAT` (`app_history::ntuser`), one `AppTrace` per
   tool, list entry, account or setting, with its `App`, key, value and last-write time: each
   Sysinternals tool whose licence the user accepted (`Software\Sysinternals\<tool>`; its key's
@@ -479,6 +489,15 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
   `ntuser_persistence`, and the same (none) `AppInit_DLLs` and IFEO debuggers as its
   `appinitdlls` and `image_file_execution_options`; on regipy's `SYSTEM`, the same LSA packages
   as its `lsa_packages`.
+- Application compatibility data on 10 public `SOFTWARE` and 19 public `NTUSER.DAT` hives
+  (regipy's, Plaso's, notatin's, artemis' and the DFIR Artifact Museum's, Windows 7 to 11): the
+  same 449 Program Compatibility Assistant `Store` values (name and data, byte for byte), 52
+  `Persisted` values and 3 layers as a reader built on yarp (the one dirty hive with them has one
+  more `Store` value with its logs replayed, as yarp's replay has); on Plaso's Windows 10
+  `SOFTWARE`, the same program paths and command lines, database by database (7 databases, 46
+  strings), as dissect.target's `cit` plugin, which lists one program twice in one database; and
+  no layers or custom shim databases in any public `SOFTWARE`, as regipy's `appcompat_flags`
+  finds.
 - The audit policy on 8 public `SECURITY` hives (regipy's, the DFIR Artifact Museum's and one
   more public test set; Windows 10, 11, Server 2012 R2 and 2022, with 59 and 56
   subcategories): the same 466 settings as dissect's `auditpol`. The order of the subcategories
@@ -577,3 +596,5 @@ Security-setting tests cover malformed values, exclusions, logging and control s
 Office tests cover recent-file timestamps, trust records, macro settings and trusted locations.
 
 Audit-policy tests cover both layouts and malformed category counts.
+
+AppCompat tests include public CIT data under Plaso's Apache-2.0 fixture licence.

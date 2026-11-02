@@ -6,6 +6,7 @@
 use std::fmt::Write as _;
 
 use ys_registry_parser::app_history::{self, App, AppTrace};
+use ys_registry_parser::appcompat::{self, AppCompatEntry};
 use ys_registry_parser::audit_policy::{Layout, Setting, audit_policy};
 use ys_registry_parser::installed::{self, Program, ProgramSource, Scope};
 use ys_registry_parser::ntuser::{
@@ -6150,4 +6151,265 @@ fn empty_audit_policy_has_a_diagnostic() {
     let p = audit_policy(&t.hive("ROOT")).unwrap();
     assert!(p.problems.iter().any(|p| p.contains("empty")));
     assert_eq!(p.data_raw, Some(vec![]));
+}
+
+/// Each entry as `source key | path | layers | sdb`, with what else is set.
+fn appcompat_lines(entries: &[AppCompatEntry]) -> Vec<String> {
+    let text = |t: &Option<String>| t.clone().unwrap_or_else(|| "-".to_owned());
+    entries
+        .iter()
+        .map(|e| {
+            let mut line = format!(
+                "{} {} | {} | {} | {} {}",
+                e.source.name(),
+                e.key_path.rsplit('\\').next().unwrap(),
+                text(&e.path),
+                text(&e.layers),
+                text(&e.sdb_guid),
+                text(&e.sdb_path),
+            );
+            if let Some(t) = e.last_seen {
+                let _ = write!(line, " last_seen={t}");
+            }
+            if let Some(t) = e.sdb_installed {
+                let _ = write!(line, " installed={t}");
+            }
+            for (k, v) in &e.details {
+                let _ = write!(line, " {k}={v}");
+            }
+            if e.wow64 {
+                line.push_str(" wow64");
+            }
+            if e.data_raw.is_some() {
+                line.push_str(" raw");
+            }
+            for p in &e.problems {
+                let _ = write!(line, " [{p}]");
+            }
+            line
+        })
+        .collect()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn appcompat_of_a_software_hive() {
+    let flags = r"Microsoft\Windows NT\CurrentVersion\AppCompatFlags";
+    let guid = "{8E9D8F3C-6B7A-4D5C-3E2F-1A0B9C8D7E6F}";
+    let module = format!(r"{flags}\CIT\Module\System32/mrt100.dll");
+    // a CIT database of Plaso's Windows 10 SOFTWARE hive (Apache-2.0)
+    let database = std::fs::read(format!(
+        "{}/tests/fixtures/plaso/cit_system_88EDBB9D.bin",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let mut t = Tree::default();
+    t.sz(
+        &format!(r"{flags}\Layers"),
+        r"C:\Users\alice\tool.exe",
+        "~ RUNASADMIN WIN7RTM",
+    )
+    .sz(
+        &format!(r"Wow6432Node\{flags}\Layers"),
+        r"C:\Old\old.exe",
+        " WINXPSP3 ",
+    )
+    .set(
+        &module,
+        r"\Device\HarddiskVolume1\Windows\System32\backgroundTaskHost.exe",
+        11,
+        &WHEN.to_le_bytes(),
+    )
+    .set(&module, "OverflowQuota", 11, &WHEN.to_le_bytes())
+    .set(&module, "OverflowValue", 11, &WHEN.to_le_bytes())
+    .set(&module, r"\Device\HarddiskVolume1\x.exe", 3, &[1, 2, 3])
+    .dword(&format!(r"{flags}\CIT\System"), "Override", 2)
+    .set(
+        &format!(r"{flags}\CIT\System"),
+        "88EDBB9D08A39000000876E398222D10",
+        3,
+        &database,
+    )
+    .set(&format!(r"{flags}\CIT\System"), "Cut", 3, &database[..600])
+    .sz(
+        &format!(r"{flags}\InstalledSDB\{guid}"),
+        "DatabasePath",
+        r"C:\ProgramData\shim.sdb",
+    )
+    .sz(
+        &format!(r"{flags}\InstalledSDB\{guid}"),
+        "DatabaseDescription",
+        "Updater",
+    )
+    .set(
+        &format!(r"{flags}\InstalledSDB\{guid}"),
+        "DatabaseInstallTimeStamp",
+        11,
+        &WHEN.to_le_bytes(),
+    )
+    .dword(
+        &format!(r"{flags}\InstalledSDB\{guid}"),
+        "DatabaseType",
+        0x0001_0000,
+    )
+    .set(
+        &format!(r"{flags}\Custom\notepad.exe"),
+        &format!("{guid}.sdb"),
+        11,
+        &(WHEN + 1).to_le_bytes(),
+    )
+    // a database InstalledSDB doesn't list, whose time isn't 8 bytes
+    .set(
+        &format!(r"Wow6432Node\{flags}\Custom\calc.exe"),
+        "{00000000-0000-0000-0000-000000000001}.sdb",
+        3,
+        &[1, 2, 3, 4],
+    );
+    let (entries, problems) = appcompat::software(&t.hive("ROOT"));
+    assert_eq!(problems, Vec::<String>::new());
+    let cit = |path: &str| {
+        format!("cit_system System | {path} | - | - - Database=88EDBB9D08A39000000876E398222D10")
+    };
+    let mut expected = vec![
+        r"layers Layers | C:\Users\alice\tool.exe | ~ RUNASADMIN WIN7RTM | - -".to_owned(),
+        r"layers Layers | C:\Old\old.exe | WINXPSP3 | - - wow64".to_owned(),
+        format!(
+            r"cit_module System32/mrt100.dll | \Device\HarddiskVolume1\Windows\System32\backgroundTaskHost.exe | - | - - last_seen={WHEN} Module=System32/mrt100.dll"
+        ),
+        r"cit_module System32/mrt100.dll | \Device\HarddiskVolume1\x.exe | - | - - Module=System32/mrt100.dll raw [\Device\HarddiskVolume1\x.exe: REG_BINARY of 3 bytes, not a time (REG_QWORD)]".to_owned(),
+    ];
+    // the program paths and command lines dissect.target's cit plugin gives for this database
+    let volume = r"\DEVICE\HARDDISKVOLUME2\WINDOWS";
+    for program in [
+        format!(r"{volume}\SYSTEM32\CSRSS.EXE"),
+        format!(r"{volume}\SYSTEM32\LOGONUI.EXE"),
+        format!(r"{volume}\EXPLORER.EXE"),
+        format!(r"{volume}\SYSTEM32\TASKMGR.EXE"),
+        format!(r"{volume}\SYSTEM32\MMC.EXE"),
+        r#""C:\WINDOWS\SYSTEM32\MMC.EXE" "C:\WINDOWS\SYSTEM32\EVENTVWR.MSC" "#.to_owned(),
+        format!(r"{volume}\SYSTEM32\DWM.EXE"),
+        format!(r"{volume}\SYSTEM32\CONHOST.EXE"),
+        format!(r"{volume}\SYSTEM32\OPENWITH.EXE"),
+        format!(r"{volume}\SYSTEM32\DLLHOST.EXE"),
+        r"C:\WINDOWS\SYSTEM32\DLLHOST.EXE /PROCESSID:{76D0CB12-7604-4048-B83C-1005C7DDC503}"
+            .to_owned(),
+    ] {
+        expected.push(cit(&program));
+    }
+    expected.extend([
+        "cit_system System | - | - | - - Database=Cut raw [its header gives 1326 bytes, the value has 600]".to_owned(),
+        format!(
+            r"installed_sdb {guid} | - | - | {guid} C:\ProgramData\shim.sdb installed={WHEN} DatabaseDescription=Updater DatabaseType=0x10000"
+        ),
+        format!(
+            r"custom_sdb notepad.exe | notepad.exe | - | {guid} C:\ProgramData\shim.sdb installed={}",
+            WHEN + 1
+        ),
+        "custom_sdb calc.exe | calc.exe | - | {00000000-0000-0000-0000-000000000001} - wow64 raw [{00000000-0000-0000-0000-000000000001}.sdb: REG_BINARY of 4 bytes, not a time (REG_QWORD)]".to_owned(),
+    ]);
+    assert_eq!(appcompat_lines(&entries), expected);
+    assert!(entries.iter().all(|e| e.machine && !e.replayed));
+    assert_eq!(entries[0].key_path, format!(r"{flags}\Layers"));
+    assert_eq!(
+        entries[0].value_name.as_deref(),
+        Some(r"C:\Users\alice\tool.exe")
+    );
+    assert_eq!(
+        entries.last().unwrap().data_raw.as_deref(),
+        Some(&[1u8, 2, 3, 4][..])
+    );
+    // the same keys are a user's in NTUSER.DAT only under Software
+    assert_eq!(appcompat::ntuser(&t.hive("ROOT")), (Vec::new(), Vec::new()));
+}
+
+#[test]
+fn appcompat_of_an_ntuser_hive() {
+    let flags = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags";
+    let store = format!(r"{flags}\Compatibility Assistant\Store");
+    let persisted = format!(r"{flags}\Compatibility Assistant\Persisted");
+    let mut sacp = b"SACP".to_vec();
+    sacp.extend([1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0x28, 0, 0, 0]);
+    let mut t = Tree::default();
+    t.sz(
+        &format!(r"{flags}\Layers"),
+        r"C:\Users\alice\game.exe",
+        "~ HIGHDPIAWARE",
+    )
+    .set(&store, r"C:\Users\alice\Downloads\tool.exe", 3, &sacp)
+    .set(&store, "SIGN.MEDIA=1FF3254 setup64.exe", 3, &sacp)
+    .set(&store, r"C:\x.exe", 3, b"JUNK")
+    .dword(&persisted, r"\\server\share\setup.exe", 1)
+    .sz(&persisted, r"C:\y.exe", "1");
+    let (entries, problems) = appcompat::ntuser(&t.hive("ROOT"));
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        appcompat_lines(&entries),
+        [
+            r"layers Layers | C:\Users\alice\game.exe | ~ HIGHDPIAWARE | - -",
+            r"pca_store Store | C:\Users\alice\Downloads\tool.exe | - | - - raw",
+            "pca_store Store | setup64.exe | - | - - SignMedia=1FF3254 raw",
+            r"pca_store Store | C:\x.exe | - | - - raw [is not a SACP record (Program Compatibility Assistant data)]",
+            r"pca_persisted Persisted | \\server\share\setup.exe | - | - -",
+            r"pca_persisted Persisted | C:\y.exe | - | - - raw [is REG_SZ, not REG_DWORD]",
+        ]
+    );
+    assert!(entries.iter().all(|e| !e.machine && e.last_seen.is_none()));
+    assert_eq!(entries[1].data_raw.as_deref(), Some(&sacp[..]));
+}
+
+#[test]
+fn appcompat_keeps_invalid_times_and_empty_values() {
+    let base = r"Microsoft\Windows NT\CurrentVersion\AppCompatFlags";
+    let mut t = Tree::default();
+    t.set(
+        &format!(r"{base}\CIT\Module\module.dll"),
+        r"C:\x.exe",
+        11,
+        &u64::MAX.to_le_bytes(),
+    );
+    let (rows, _) = appcompat::software(&t.hive("ROOT"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].last_seen, None);
+    assert_eq!(rows[0].data_raw, Some(u64::MAX.to_le_bytes().to_vec()));
+    assert!(rows[0].problems.iter().any(|p| p.contains("FILETIME")));
+    let mut t = Tree::default();
+    t.set(&format!(r"Software\{base}\Layers"), r"C:\x.exe", 4, &[]);
+    t.set(
+        &format!(r"Software\{base}\Compatibility Assistant\Persisted"),
+        r"C:\y.exe",
+        4,
+        &[],
+    );
+    let (rows, _) = appcompat::ntuser(&t.hive("ROOT"));
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert!(row.problems.iter().any(|p| p.contains("REG_DWORD")));
+        assert_eq!(row.data_raw, Some(vec![]));
+    }
+}
+
+#[test]
+fn appcompat_custom_shims_keep_joined_path_damage() {
+    let base = r"Microsoft\Windows NT\CurrentVersion\AppCompatFlags";
+    let guid = "{00000000-0000-0000-0000-000000000001}";
+    let mut t = Tree::default();
+    t.set(
+        &format!(r"{base}\InstalledSDB\{guid}"),
+        "DatabasePath",
+        1,
+        &[b'C', 0, 0xff],
+    );
+    t.set(
+        &format!(r"{base}\Custom\target.exe"),
+        &format!("{guid}.sdb"),
+        3,
+        &[],
+    );
+    let (rows, _) = appcompat::software(&t.hive("ROOT"));
+    let row = rows
+        .iter()
+        .find(|r| r.source == appcompat::AppCompatSource::CustomSdb)
+        .unwrap();
+    assert!(row.problems.iter().any(|p| p.contains("UTF-16")));
+    assert_eq!(row.data_raw, Some(vec![b'C', 0, 0xff]));
 }

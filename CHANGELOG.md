@@ -5,6 +5,8 @@
 First version. (@YamatoSecurity)
 
 ### Fixed
+- AppCompat validates and bounds CIT/LZNT1 decoding, preserves Unicode paths and malformed
+  time/value bytes, and keeps shim-path join provenance and diagnostics. (@YamatoSecurity)
 - Audit-policy decoding reserves its unused word even with corrupt counts, rejects unsupported
   revisions, reports empty values and accepts nonzero legacy BOOLEAN values. (@YamatoSecurity)
 - Diagnose Office macro and trust-policy values stored with a non-DWORD type while retaining
@@ -172,3 +174,8 @@ First version. (@YamatoSecurity)
   category's subcategories) or per category (Windows XP and 2003, with whether auditing is on).
   Each `AuditSetting` has its category, subcategory, GUID, message ID (`subcategory_id`) and
   `Setting`. (@YamatoSecurity)
+- `appcompat` (`AppCompatEntry`, `AppCompatSource`): application compatibility data beyond the
+  ShimCache and Amcache, in `SOFTWARE` (`software`: compatibility layers, `CIT\Module`,
+  `CIT\System`'s compressed databases, custom shim databases in `InstalledSDB` and `Custom`) and
+  `NTUSER.DAT` (`ntuser`: layers, and the Program Compatibility Assistant's `Store` and
+  `Persisted`); `lznt1` (LZNT1 decompression) and `sign_media`. (@YamatoSecurity)

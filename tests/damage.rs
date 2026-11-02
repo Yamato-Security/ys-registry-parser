@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use proptest::prelude::*;
 use ys_registry_parser::app_history;
+use ys_registry_parser::appcompat;
 use ys_registry_parser::audit_policy::{audit_events, audit_policy};
 use ys_registry_parser::comdlg32::{dialogs, item_list_problem};
 use ys_registry_parser::installed::{self, install_date, msi_version, package_name, unpack_guid};
@@ -65,6 +66,22 @@ fn system_win10() -> &'static [u8] {
 fn ntuser() -> &'static [u8] {
     static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
     NTUSER.get_or_init(|| fixture("NTUSER.DAT"))
+}
+
+/// regipy's dirty `NTUSER.DAT`, with the Program Compatibility Assistant's `Store`, unpacked
+/// once.
+fn ntuser_pca() -> &'static [u8] {
+    static NTUSER: OnceLock<Vec<u8>> = OnceLock::new();
+    NTUSER.get_or_init(|| fixture("transactions_NTUSER.DAT"))
+}
+
+/// A CIT database of Plaso's Windows 10 `SOFTWARE` hive.
+fn cit_database() -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/tests/fixtures/plaso/cit_system_88EDBB9D.bin",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }
 
 /// Plaso's Windows 7 NTUSER.DAT, with Office lists and trust records, unpacked once.
@@ -219,6 +236,7 @@ fn read_all(data: Vec<u8>) {
             let _ = (setting.subcategory_id(), setting.setting.name());
         }
     }
+    let _ = (appcompat::software(&hive), appcompat::ntuser(&hive));
     let machine = MachineClasses::read(&hive);
     let _ = (feature_usage(&hive), feature_usage_created(&hive));
     let _ = (recent_apps(&hive), taskband(&hive), programs_cache(&hive));
@@ -330,6 +348,18 @@ proptest! {
         read_all(damage(security().to_vec(), flips));
     }
 
+    /// Compatibility data's keys and values damaged: read without a panic.
+    #[test]
+    fn damaged_appcompat(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
+    ) {
+        if let Ok((hive, _)) =
+            ys_registry_parser::Hive::open(damage(ntuser_pca().to_vec(), flips), &[])
+        {
+            let _ = appcompat::ntuser(&hive);
+        }
+    }
+
     #[test]
     fn a_damaged_ntuser_hive(
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
@@ -390,6 +420,8 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = appcompat::lznt1(&rest, 1 << 16);
+        let _ = appcompat::sign_media(&String::from_utf8_lossy(&rest));
         // PolAdtEv: any bytes, and bytes that start as the subcategory layout's header does
         let mut adt = vec![0, 1, 0, 0, version as u8, 0, 0, 0];
         adt.extend(&rest);
@@ -406,6 +438,18 @@ proptest! {
         let _ = (usb::device_ref(&text), usb::storage_name(&text), usb::vid_pid(&text));
         let _ = usb::serial("USBSTOR", &text);
         let _ = device_path(&String::from_utf8_lossy(&rest));
+    }
+
+    /// A real CIT database with bytes changed: decompressed as far as it goes.
+    #[test]
+    fn damaged_lznt1(flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..40)) {
+        let mut data = cit_database();
+        for (at, byte) in flips {
+            let at = 8 + at % (data.len() - 8);
+            data[at] = byte;
+        }
+        let _ = appcompat::lznt1(&data[8..], 1 << 20);
+
     }
 }
 

@@ -8,7 +8,8 @@
 //! Within a category, the settings are in Windows' own order of its subcategories, the index in
 //! the subcategory's message ID (`%%12548` is Logon/Logoff's index 4, Special Logon): the order
 //! of their GUIDs differs. Each version adds subcategories at the end of their category: Windows
-//! 10 and 11 have 59, Windows 8.1 and Server 2012 R2 56.
+//! 10 and 11 captures commonly have 59 named subcategories; newer captures can contain
+//! additional unnamed slots. Windows 8.1 and Server 2012 R2 have 56.
 //!
 //! Windows XP and Server 2003 keep one setting per category (`Layout::Categories`), as the
 //! `POLICY_AUDIT_EVENTS_INFO` structure has them, in 44 bytes: whether auditing is on (a one-byte
