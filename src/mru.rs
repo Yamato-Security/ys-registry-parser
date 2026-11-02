@@ -312,8 +312,15 @@ fn decode_value(entry: &mut MruEntry, value: &Value) {
         if kind != ValueType::Binary {
             problems.push(format!("is {}, not REG_BINARY", kind.name()));
         }
+        if !bytes.len().is_multiple_of(2) {
+            problems
+                .push("its term has an odd byte count: the UTF-16 data is cut short".to_owned());
+        }
         let units = utf16_units(&bytes);
         if let Some(end) = units.iter().position(|&u| u == 0) {
+            if units[end + 1..].iter().any(|&u| u != 0) {
+                problems.push("its term has characters past its NUL".to_owned());
+            }
             if String::from_utf16(&units[..end]).is_err() {
                 problems.push("its term is not valid UTF-16: decoded lossily".to_owned());
             }

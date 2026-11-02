@@ -1,6 +1,7 @@
 //! `NTUSER.DAT` hives: Explorer's recent documents (`RecentDocs`, in the order of its
-//! `MRUListEx`), the programs and shortcuts a user started from Explorer (`UserAssist`), and the
-//! name of the profile a hive belongs to.
+//! `MRUListEx`), the programs and shortcuts a user started from Explorer (`UserAssist`), the
+//! name of the profile a hive belongs to; and with `UsrClass.dat` hives, the programs a user ran
+//! with the names their version resources give (`MuiCache`).
 //!
 //! A `RecentDocs` value is the item's name (UTF-16, up to its NUL), then a shell item list
 //! whose first item is the file entry of the shortcut Windows made in the `Recent` folder: an
@@ -13,11 +14,18 @@
 //! and later) data is 72 bytes: a session number, the run count, the focus count and time (ms),
 //! and from offset `0x3C` the FILETIME of the last run. Version 3 (Windows 2000 to Vista) is 16
 //! bytes: a session number, the run count plus 5, and the FILETIME of the last run.
+//!
+//! `MuiCache` is in `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell\MuiCache`,
+//! Windows Vista and later) and in `NTUSER.DAT` (`Software\Microsoft\Windows\ShellNoRoam\MUICache`,
+//! Windows XP). Windows 8 and later write two values per program, `<path>.FriendlyAppName` and
+//! `<path>.ApplicationCompany`; Windows XP and 7 one, `<path>`, the friendly name. `LangID` is the
+//! language of the strings, and values named `@<file>,-<number>` are resource strings the shell
+//! cached (`@shell32.dll,-22019`), not programs.
 
-use crate::bytes::{u16_at, u32_at, u64_at, utf16_units};
+use crate::bytes::{u16_at, u32_at, u64_at, upcase_name, utf16_units};
 use crate::data::{Data, ValueType, decode, filetime};
 use crate::hive::{Hive, Key, Status, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Where Explorer keeps the recent documents, under the hive's root.
 pub const RECENT_DOCS: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs";
@@ -614,6 +622,41 @@ pub(crate) struct MruLetter<'h> {
     pub(crate) problem: Option<String>,
 }
 
+/// Compare one-letter value names with the registry's non-expanding uppercase mapping.
+fn same_mru_letter(a: char, b: char) -> bool {
+    a == b || upcase_name(&a.to_string()) == upcase_name(&b.to_string())
+}
+
+/// Keep original positions, including the gaps left by malformed characters or duplicates.
+fn mru_letters(bytes: &[u8], problems: &mut Vec<String>) -> Vec<(usize, char)> {
+    if !bytes.len().is_multiple_of(2) {
+        problems.push("MRUList: odd byte count: the UTF-16 data is cut short".to_owned());
+    }
+    let units = utf16_units(bytes);
+    let end = units.iter().position(|&u| u == 0).unwrap_or_else(|| {
+        problems.push("MRUList: no terminating NUL".to_owned());
+        units.len()
+    });
+    if units[end..].iter().any(|&u| u != 0) {
+        problems.push("MRUList: characters past its NUL".to_owned());
+    }
+    let mut list = Vec::new();
+    for (position, c) in char::decode_utf16(units[..end].iter().copied()).enumerate() {
+        let Ok(c) = c else {
+            problems.push("MRUList: not valid UTF-16".to_owned());
+            continue;
+        };
+        if list.iter().any(|&(_, l)| same_mru_letter(l, c)) {
+            problems.push(format!("MRUList: {c} is listed twice"));
+        } else {
+            // A damaged character or a duplicate still occupies its slot. Do not
+            // promote a later value to position zero and give it the key's time.
+            list.push((position, c));
+        }
+    }
+    list
+}
+
 /// The lettered values of `key` (`a`, `b`, …) in the order of its `MRUList`, a string of their
 /// letters with the most recent first, then those it doesn't list; whether that list came from
 /// the transaction logs; and what is wrong with the key's values. Letters match in any case, as
@@ -623,9 +666,8 @@ pub(crate) fn mru_list_items<'h>(
     others: &[&str],
 ) -> (Vec<MruLetter<'h>>, bool, Vec<String>) {
     let (values, mut problems) = key.values();
-    let mut order: Option<(Vec<char>, bool)> = None;
+    let mut order: Option<(Vec<(usize, char)>, bool)> = None;
     let mut lettered: Vec<(char, Value<'h>)> = Vec::new();
-    let same = |a: char, b: char| a == b || a.to_lowercase().eq(b.to_lowercase());
     for value in values {
         let name = value.name();
         let mut chars = name.chars();
@@ -640,30 +682,17 @@ pub(crate) fn mru_list_items<'h>(
                     value.value_type().name()
                 ));
             }
-            let units = utf16_units(&bytes);
-            let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
-            if units[end..].iter().any(|&u| u != 0) {
-                problems.push("MRUList: characters past its NUL".to_owned());
-            }
-            let mut list = Vec::new();
-            for c in char::decode_utf16(units[..end].iter().copied()) {
-                let Ok(c) = c else {
-                    problems.push("MRUList: not valid UTF-16".to_owned());
-                    continue;
-                };
-                if list.iter().any(|&l| same(l, c)) {
-                    problems.push(format!("MRUList: {c} is listed twice"));
-                } else {
-                    list.push(c);
-                }
-            }
+            let list = mru_letters(&bytes, &mut problems);
             if order.is_some() {
                 problems.push("MRUList is present more than once".to_owned());
             } else {
                 order = Some((list, value.status() == Status::Replayed));
             }
         } else if let (Some(letter), None) = (chars.next(), chars.next()) {
-            if lettered.iter().any(|(other, _)| same(*other, letter)) {
+            if lettered
+                .iter()
+                .any(|(other, _)| same_mru_letter(*other, letter))
+            {
                 problems.push(format!("lettered value {letter} is present more than once"));
             }
             lettered.push((letter, value));
@@ -679,12 +708,12 @@ pub(crate) fn mru_list_items<'h>(
     });
     let mut used: HashSet<usize> = HashSet::new();
     let mut items = Vec::new();
-    for (position, &letter) in order.iter().enumerate() {
+    for &(position, letter) in &order {
         let position = u32::try_from(position).ok();
         match lettered
             .iter()
             .enumerate()
-            .find(|(at, (l, _))| same(*l, letter) && !used.contains(at))
+            .find(|(at, (l, _))| same_mru_letter(*l, letter) && !used.contains(at))
         {
             Some((at, (l, value))) => {
                 used.insert(at);
@@ -705,7 +734,7 @@ pub(crate) fn mru_list_items<'h>(
     }
     for (at, (letter, value)) in lettered.iter().enumerate() {
         if !used.contains(&at) {
-            let problem = if order.iter().any(|&l| same(l, *letter)) {
+            let problem = if order.iter().any(|&(_, l)| same_mru_letter(l, *letter)) {
                 format!("another value named {letter} already occupies its MRUList position")
             } else {
                 "MRUList doesn't list it".to_owned()
@@ -1070,6 +1099,171 @@ pub fn user_assist_settings(hive: &Hive) -> UserAssistSettings {
         no_instrumentation: dword(r"Policies\Explorer", "NoInstrumentation"),
         no_log: dword(r"Explorer\UserAssist\Settings", "NoLog"),
         no_encrypt: dword(r"Explorer\UserAssist\Settings", "NoEncrypt"),
+    }
+}
+
+/// Where Windows Vista and later keep `MuiCache`, under a `UsrClass.dat` hive's root.
+pub const MUI_CACHE: &str = r"Local Settings\Software\Microsoft\Windows\Shell\MuiCache";
+/// Where Windows XP keeps it, under an `NTUSER.DAT` hive's root.
+pub const MUI_CACHE_XP: &str = r"Software\Microsoft\Windows\ShellNoRoam\MUICache";
+/// The keys `mui_cache` reads: also the Vista key under `Software\Classes`, as an `NTUSER.DAT`
+/// merged with its `UsrClass.dat` has it.
+const MUI_CACHE_KEYS: [&str; 3] = [
+    MUI_CACHE,
+    r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache",
+    MUI_CACHE_XP,
+];
+/// The suffixes of a program's values (Windows 8 and later).
+const FRIENDLY_APP_NAME: &str = ".FriendlyAppName";
+const APPLICATION_COMPANY: &str = ".ApplicationCompany";
+
+/// One program in `MuiCache`: its path, and the name and company Windows read from its version
+/// resources, joined from its values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MuiCacheEntry {
+    /// The `MuiCache` key it is in, under the hive's root: [`MUI_CACHE`], the same under
+    /// `Software\Classes`, or [`MUI_CACHE_XP`].
+    pub key_path: &'static str,
+    /// When that key was last written (FILETIME): the latest change to any of its programs.
+    pub key_last_written: u64,
+    /// The program's path: the value's name without `.FriendlyAppName` or
+    /// `.ApplicationCompany`.
+    pub path: String,
+    /// `<path>.FriendlyAppName`'s text, or `<path>`'s (Windows XP and 7).
+    pub friendly_app_name: Option<String>,
+    /// `<path>.ApplicationCompany`'s text.
+    pub application_company: Option<String>,
+    /// The friendly name value's bytes, when they aren't text that decodes cleanly.
+    pub friendly_app_name_raw: Option<Vec<u8>>,
+    /// The company value's bytes, when they aren't text that decodes cleanly.
+    pub application_company_raw: Option<Vec<u8>>,
+    /// Whether the transaction logs' replay wrote one of its values (the key itself is
+    /// rewritten whenever any value changes, so it doesn't count).
+    pub replayed: bool,
+    /// What couldn't be read.
+    pub problems: Vec<String>,
+}
+
+/// The `MuiCache` of a user hive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MuiCache {
+    /// One per program, in the order of its first value; a program whose values repeat a field
+    /// (both forms of a name) gets one per value of it.
+    pub entries: Vec<MuiCacheEntry>,
+    /// How many `@<file>,-<number>` values there are: resource strings, not programs, left out.
+    pub resource_strings: usize,
+    /// What keeps keys or values from being read.
+    pub problems: Vec<String>,
+}
+
+/// The programs of `hive`'s `MuiCache` keys ([`MUI_CACHE`], the same under `Software\Classes`,
+/// then [`MUI_CACHE_XP`]), without `LangID` and the resource strings. `None` when it has none of
+/// them.
+#[must_use]
+pub fn mui_cache(hive: &Hive) -> Option<MuiCache> {
+    let mut found = false;
+    let mut cache = MuiCache::default();
+    for key_path in MUI_CACHE_KEYS {
+        let Some(key) = hive.key(key_path) else {
+            continue;
+        };
+        found = true;
+        let (values, why) = key.values();
+        cache
+            .problems
+            .extend(why.into_iter().map(|w| format!("{key_path}: {w}")));
+        let template = MuiCacheEntry {
+            key_path,
+            key_last_written: key.last_written(),
+            ..MuiCacheEntry::default()
+        };
+        // each program's (its path in upper case) latest entry, and which of its two fields
+        // (name, company) a value has given
+        let mut latest: HashMap<String, (usize, [bool; 2])> = HashMap::new();
+        for value in &values {
+            let name = value.name();
+            if name.starts_with('@') {
+                cache.resource_strings += 1;
+                continue;
+            }
+            if name.eq_ignore_ascii_case("LangID") {
+                continue;
+            }
+            let (path, company) = match strip_suffix(&name, APPLICATION_COMPANY) {
+                Some(path) => (path, true),
+                None => (
+                    strip_suffix(&name, FRIENDLY_APP_NAME).unwrap_or(&name),
+                    false,
+                ),
+            };
+            let field = usize::from(company);
+            let comparison_key = upcase_name(path);
+            let at = match latest.get_mut(&comparison_key) {
+                Some((at, given)) if !given[field] => {
+                    given[field] = true;
+                    *at
+                }
+                _ => {
+                    cache.entries.push(MuiCacheEntry {
+                        path: path.to_owned(),
+                        ..template.clone()
+                    });
+                    let mut given = [false; 2];
+                    given[field] = true;
+                    latest.insert(comparison_key, (cache.entries.len() - 1, given));
+                    cache.entries.len() - 1
+                }
+            };
+            let entry = &mut cache.entries[at];
+            let (text, raw, why) = string_value(value);
+            let field = if company {
+                entry.application_company = text;
+                entry.application_company_raw = raw;
+                "ApplicationCompany"
+            } else {
+                entry.friendly_app_name = text;
+                entry.friendly_app_name_raw = raw;
+                "FriendlyAppName"
+            };
+            entry
+                .problems
+                .extend(why.map(|why| format!("{field}: {why}")));
+            entry.replayed |= value.status() == Status::Replayed;
+        }
+    }
+    found.then_some(cache)
+}
+
+/// `name` without `suffix`, in any case.
+fn strip_suffix<'n>(name: &'n str, suffix: &str) -> Option<&'n str> {
+    let cut = name.len().checked_sub(suffix.len())?;
+    let (head, tail) = (name.get(..cut)?, name.get(cut..)?);
+    tail.eq_ignore_ascii_case(suffix).then_some(head)
+}
+
+/// A string value's text; its bytes when they aren't text that decodes cleanly (another type,
+/// invalid UTF-16, not read whole); and why.
+fn string_value(value: &Value) -> (Option<String>, Option<Vec<u8>>, Option<String>) {
+    let (bytes, read_problem) = value.read_data();
+    if let Some(why) = read_problem {
+        return (None, Some(bytes), Some(why));
+    }
+    let (text, lossy) = match decode(value.data_type(), &bytes) {
+        Data::Text { value, lossy } => (value, lossy),
+        // a string written as a multi-string: its one string
+        Data::MultiText { values, lossy } if values.len() <= 1 => {
+            (values.into_iter().next().unwrap_or_default(), lossy)
+        }
+        _ => {
+            let why = format!("is {}, not a string", value.value_type().name());
+            return (None, Some(bytes), Some(why));
+        }
+    };
+    if lossy {
+        let why = "is not valid UTF-16: decoded lossily".to_owned();
+        (Some(text), Some(bytes), Some(why))
+    } else {
+        (Some(text), None, None)
     }
 }
 
