@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
+use ys_registry_parser::lsa_secrets::{cached_logons, secret_kind, secrets};
 use ys_registry_parser::ntuser::{
     classes_sid, profile_name, recent_docs, user_assist, user_assist_data, user_assist_settings,
 };
@@ -29,6 +30,12 @@ fn fixture(name: &str) -> Vec<u8> {
 fn system() -> &'static [u8] {
     static SYSTEM: OnceLock<Vec<u8>> = OnceLock::new();
     SYSTEM.get_or_init(|| fixture("SYSTEM"))
+}
+
+/// The SECURITY hive, unpacked once.
+fn security() -> &'static [u8] {
+    static SECURITY: OnceLock<Vec<u8>> = OnceLock::new();
+    SECURITY.get_or_init(|| fixture("SECURITY"))
 }
 
 /// The NTUSER.DAT hive, unpacked once.
@@ -68,6 +75,10 @@ fn read_all(data: Vec<u8>) {
     let _ = (recent_docs(&hive), profile_name(&hive), task_cache(&hive));
     let _ = (user_assist(&hive), user_assist_settings(&hive));
     let _ = accounts(&hive);
+    for secret in secrets(&hive).map(|s| s.0).unwrap_or_default() {
+        let _ = (secret.kind.name(), secret.current.has_data());
+    }
+    let _ = cached_logons(&hive);
     let machine = MachineClasses::read(&hive);
     let _ = (persistence::software(&hive), profile_list(&hive));
     let _ = persistence::ntuser(&hive, Some(&machine));
@@ -109,6 +120,13 @@ proptest! {
     }
 
     #[test]
+    fn a_damaged_security_hive(
+        flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..300)
+    ) {
+        read_all(damage(security().to_vec(), flips));
+    }
+
+    #[test]
     fn a_damaged_ntuser_hive(
         flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..3000)
     ) {
@@ -138,5 +156,6 @@ proptest! {
         let _ = user_assist_data(&rest).map(|d| d.run_count());
         let _ = dynamic_info(&rest);
         let _ = (user_f(&rest), user_v(&rest), user_v(&bytes));
+        let _ = secret_kind(&String::from_utf8_lossy(&rest));
     }
 }

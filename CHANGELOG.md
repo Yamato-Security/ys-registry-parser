@@ -52,3 +52,8 @@ First version. (@YamatoSecurity)
   bins, and what only the transaction logs kept (the hive before their replay, and each log
   entry's pages), each once with every place it was found and whether it is complete, partial, a
   value without its key, or only in the logs. The hive keeps its logs' entries from `Hive::open`.
+- `lsa_secrets`: the LSA secrets (`secrets`, `Secret`, `SecretValue`, `SecretKind`, `secret_kind`)
+  and cached domain logons (`cached_logons`, `CachedLogons`) of a `SECURITY` hive, as names, kinds
+  and times only: whether `CurrVal` and `OldVal` hold data (their sizes, the bytes never read),
+  their keys' times and `CupdTime` and `OupdTime`; the cache's slots, those in use and
+  `NL$Control`'s count. Nothing is decrypted. (@YamatoSecurity)
