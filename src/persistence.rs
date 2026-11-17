@@ -750,16 +750,13 @@ impl MachineClasses {
     #[must_use]
     pub fn read(software: &Hive) -> Self {
         let names = |path: &str| -> HashSet<String> {
-            software
-                .key(path)
-                .map(|k| {
-                    k.subkeys()
-                        .0
-                        .iter()
-                        .map(|s| s.name().to_uppercase())
-                        .collect()
-                })
-                .unwrap_or_default()
+            software.key(path).map_or_default(|k| {
+                k.subkeys()
+                    .0
+                    .iter()
+                    .map(|s| s.name().to_uppercase())
+                    .collect()
+            })
         };
         MachineClasses {
             clsids: names(r"Classes\CLSID"),
@@ -1098,15 +1095,13 @@ fn approvals(f: &mut Found, base: &str, run: &[Vec<usize>; 2]) {
                 .map_err(|why| problems.push(why))
                 .ok();
             let replayed = value.status() == Status::Replayed;
-            let matched: Vec<usize> = which
-                .map(|w: usize| {
-                    run[w]
-                        .iter()
-                        .copied()
-                        .filter(|&i| f.records[i].value_name.eq_ignore_ascii_case(&name))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let matched: Vec<usize> = which.map_or_default(|w: usize| {
+                run[w]
+                    .iter()
+                    .copied()
+                    .filter(|&i| f.records[i].value_name.eq_ignore_ascii_case(&name))
+                    .collect()
+            });
             if matched.is_empty() {
                 let at = Place {
                     key,

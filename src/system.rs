@@ -62,8 +62,7 @@ impl ControlSets {
         };
         let mut present: Vec<u32> = hive
             .root()
-            .map(|root| root.subkeys().0)
-            .unwrap_or_default()
+            .map_or_default(|root| root.subkeys().0)
             .iter()
             .filter_map(|k| control_set_number(&k.name()))
             .collect();
