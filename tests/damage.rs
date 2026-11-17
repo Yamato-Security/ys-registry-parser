@@ -219,18 +219,16 @@ fn read_all(data: Vec<u8>) {
             }
         }
         let _ = security_settings::system(&hive, set);
-        devices.extend(usb::devices(&hive, set).map(|d| d.0).unwrap_or_default());
+        devices.extend(usb::devices(&hive, set).map_or_default(|d| d.0));
         let _ = bam(&hive, set);
     }
     // the USB history of a hive that is every one of its hives at once
-    let mounted = usb::mounted_devices(&hive).map(|m| m.0).unwrap_or_default();
-    let portable = usb::portable_devices(&hive)
-        .map(|p| p.0)
-        .unwrap_or_default();
-    let ready_boost = usb::ready_boost(&hive).map(|b| b.0).unwrap_or_default();
+    let mounted = usb::mounted_devices(&hive).map_or_default(|m| m.0);
+    let portable = usb::portable_devices(&hive).map_or_default(|p| p.0);
+    let ready_boost = usb::ready_boost(&hive).map_or_default(|b| b.0);
     let users = vec![(
         "user".to_owned(),
-        usb::mount_points(&hive).map(|p| p.0).unwrap_or_default(),
+        usb::mount_points(&hive).map_or_default(|p| p.0),
     )];
     let _ = usb::history(&usb::Sources {
         devices: &devices,
@@ -265,7 +263,7 @@ fn read_all(data: Vec<u8>) {
         }
     }
     let _ = (appcompat::software(&hive), appcompat::ntuser(&hive));
-    for secret in secrets(&hive).map(|s| s.0).unwrap_or_default() {
+    for secret in secrets(&hive).map_or_default(|s| s.0) {
         let _ = (secret.kind.name(), secret.current.has_data());
     }
     let _ = cached_logons(&hive);
@@ -338,7 +336,7 @@ proptest! {
             ys_registry_parser::Hive::open(damage(system_win10().to_vec(), flips), &[])
         {
             for set in ControlSets::read(&hive).present {
-                for entry in bam(&hive, set).map(|b| b.0).unwrap_or_default() {
+                for entry in bam(&hive, set).map_or_default(|b| b.0) {
                     let _ = device_path(&entry.program);
                 }
             }
@@ -505,7 +503,7 @@ proptest! {
         if let Ok((hive, _)) =
             ys_registry_parser::Hive::open(damage(plaso_ntuser().to_vec(), flips), &[])
         {
-            for entry in dialogs(&hive).map(|d| d.0).unwrap_or_default() {
+            for entry in dialogs(&hive).map_or_default(|d| d.0) {
                 let _ = entry.shell_items.as_deref().map(item_list_problem);
             }
         }

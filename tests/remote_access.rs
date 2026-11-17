@@ -41,21 +41,13 @@ fn win7_ntuser() -> Hive {
 
 /// A record as `kind target:port user | position | drive`.
 fn line(c: &Connection) -> String {
-    let port = c.port.map(|p| format!(":{p}")).unwrap_or_default();
-    let user = c
-        .username
-        .as_ref()
-        .map(|u| format!(" {u}"))
-        .unwrap_or_default();
-    let position = c
-        .mru_position
-        .map(|n| format!(" | {n}"))
-        .unwrap_or_default();
+    let port = c.port.map_or_default(|p| format!(":{p}"));
+    let user = c.username.as_ref().map_or_default(|u| format!(" {u}"));
+    let position = c.mru_position.map_or_default(|n| format!(" | {n}"));
     let drive = c
         .drive_letter
         .as_ref()
-        .map(|d| format!(" | {d}:"))
-        .unwrap_or_default();
+        .map_or_default(|d| format!(" | {d}:"));
     format!(
         "{} {}{port}{user}{position}{drive}",
         c.kind.name(),
