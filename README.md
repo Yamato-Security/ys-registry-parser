@@ -638,6 +638,16 @@ ys_registry_parser = { package = "ys-registry-parser", git = "https://github.com
 Not yet: security descriptors (`sk` cells); the data of a log entry's version of a value whose
 data cells the entry didn't write.
 
+## Contributing
+
+Contributions require this repository's [Contributor License Agreement](CLA.md).
+It permits **Zachary Mathis** and **Shirofune Security Co., Ltd.** to use and
+sell covered contributions in proprietary editions, while accepted contributions
+also remain available in the free, open-source community edition.
+Read [how to sign](CONTRIBUTING.md#how-to-sign). The `cla/required` check uses
+the [maintainer-verified signer registry](.github/cla/signatures.json); first-time
+signatures require verification and registration.
+
 ## Licence
 
 ys-registry-parser is copyright Shirofune Security Co., Ltd. and released under the [Reciprocal
