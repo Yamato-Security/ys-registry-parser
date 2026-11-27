@@ -365,12 +365,8 @@ fn service_lists_and_recovery_flags_preserve_empty_absent_and_invalid_values() {
     let invalid = eventlog(data);
     assert_eq!(invalid.required_privileges, None);
     assert_eq!(invalid.failure_actions_on_non_crash_failures, None);
-    assert!(
-        invalid
-            .problems
-            .iter()
-            .any(|p| p == "RequiredPrivileges: is REG_DWORD, not REG_MULTI_SZ")
-    );
+    assert!(invalid.problems.iter().any(|p| p
+        == "RequiredPrivileges: expected REG_MULTI_SZ, REG_SZ or REG_EXPAND_SZ; found REG_DWORD"));
     assert!(
         invalid
             .problems
@@ -378,6 +374,81 @@ fn service_lists_and_recovery_flags_preserve_empty_absent_and_invalid_values() {
             .any(|p| p == "FailureActionsOnNonCrashFailures: is REG_BINARY, not REG_DWORD")
     );
     assert_eq!(invalid.failure_actions.unwrap().actions.len(), 3);
+}
+
+#[test]
+fn service_lists_stop_at_the_windows_terminator_for_each_storage_type() {
+    let original = system_bytes();
+    // Exercise all three fields through services(), using the existing fixture's data cells.
+    let fields = [
+        ("LanmanWorkstation", "DependOnService"),
+        ("cdfs", "DependOnGroup"),
+        ("eventlog", "RequiredPrivileges"),
+    ];
+    let cells = fields.map(|(service, field)| {
+        value_offset(
+            &original,
+            &format!(r"ControlSet001\Services\{service}"),
+            field,
+        )
+    });
+    // The optional raw bytes allow testing broken UTF-16 and odd lengths as well.
+    for (kind, stored, extra, expected, diagnostic) in [
+        (1_u32, "Winmgmt\0", &[][..], vec!["Winmgmt"], None),
+        (2, "%Svc%\0", &[], vec!["%Svc%"], None),
+        (2, "\0", &[], vec![], None),
+        (7, "A\0A\0B\0\0\0", &[], vec!["A", "A", "B"], None),
+        (7, "A\0B", &[], vec!["A", "B"], None),
+        (7, "A\0\0B\0", &[], vec!["A"], Some("after the terminator")),
+        (7, "\0B\0", &[], vec![], Some("after the terminator")),
+        (1, "A\0B\0", &[], vec!["A"], Some("after the terminator")),
+        (2, "A\0B\0", &[], vec!["A"], Some("after the terminator")),
+        (7, "A", &[0, 0xd8], vec!["A�"], Some("decoded lossily")),
+        (1, "A", &[0xff], vec!["A"], Some("decoded lossily")),
+        (
+            7,
+            "A\0\0",
+            &[0xff],
+            vec!["A"],
+            Some("invalid UTF-16 and nonzero data"),
+        ),
+    ] {
+        let mut data = original.clone();
+        let mut bytes: Vec<_> = stored.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        bytes.extend_from_slice(extra);
+        for &vk in &cells {
+            let size = u32::from_le_bytes(data[vk + 8..vk + 12].try_into().unwrap());
+            assert!(size < 0x8000_0000 && bytes.len() <= size as usize);
+            let start =
+                4100 + u32::from_le_bytes(data[vk + 12..vk + 16].try_into().unwrap()) as usize;
+            data[start..start + bytes.len()].copy_from_slice(&bytes);
+            data[vk + 8..vk + 12].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+            data[vk + 16..vk + 20].copy_from_slice(&kind.to_le_bytes());
+        }
+        let records = services(&open(data), 1).unwrap().0;
+        for (name, field) in fields {
+            let service = records.iter().find(|s| s.name == name).unwrap();
+            let items = match field {
+                "DependOnService" => &service.depend_on_service,
+                "DependOnGroup" => &service.depend_on_group,
+                _ => &service.required_privileges,
+            };
+            assert_eq!(items.as_ref().unwrap(), &expected, "{field}: {stored:?}");
+            let diagnostics: Vec<_> = service
+                .problems
+                .iter()
+                .filter(|p| p.starts_with(field))
+                .collect();
+            assert_eq!(
+                diagnostics.len(),
+                usize::from(diagnostic.is_some()),
+                "{field}: {stored:?}"
+            );
+            if let Some(message) = diagnostic {
+                assert!(diagnostics[0].contains(message), "{field}: {diagnostics:?}");
+            }
+        }
+    }
 }
 
 #[test]

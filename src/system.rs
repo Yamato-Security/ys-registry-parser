@@ -341,7 +341,7 @@ fn service_list(value: &Value, slot: &mut Option<Vec<String>>) -> Option<String>
         ValueType::MultiSz | ValueType::Sz | ValueType::ExpandSz
     ) {
         return Some(format!(
-            "is {}, not REG_MULTI_SZ",
+            "expected REG_MULTI_SZ, REG_SZ or REG_EXPAND_SZ; found {}",
             value.value_type().name()
         ));
     }
@@ -349,16 +349,36 @@ fn service_list(value: &Value, slot: &mut Option<Vec<String>>) -> Option<String>
         Ok(bytes) => bytes,
         Err(why) => return Some(why),
     };
-    let (values, lossy) = match decode(value.data_type(), &bytes) {
+    // A scalar ends at its first NUL. A list ends at its first empty element.
+    // Keep this rule local: other registry artifacts can use empty elements as data.
+    let multi = value.value_type() == ValueType::MultiSz;
+    let mut at_item_start = true;
+    let mut end = bytes.len();
+    for (index, unit) in bytes.chunks_exact(2).enumerate() {
+        let nul = unit == [0, 0];
+        if nul && (!multi || at_item_start) {
+            end = (index + 1) * 2;
+            break;
+        }
+        at_item_start = nul;
+    }
+    let (values, lossy) = match decode(value.data_type(), &bytes[..end]) {
         Data::MultiText { values, lossy } => (values, lossy),
         Data::Text { value, lossy } => (
             (!value.is_empty()).then_some(value).into_iter().collect(),
             lossy,
         ),
-        _ => return Some("could not decode REG_MULTI_SZ".to_owned()),
+        _ => return Some("could not decode service list".to_owned()),
     };
     *slot = Some(values);
-    lossy.then(|| "is not valid UTF-16: decoded lossily".to_owned())
+    let malformed = lossy || !bytes.len().is_multiple_of(2);
+    let trailing = bytes[end..].iter().any(|b| *b != 0);
+    match (malformed, trailing) {
+        (true, true) => Some("invalid UTF-16 and nonzero data after the terminator".to_owned()),
+        (true, false) => Some("is not valid UTF-16: decoded lossily".to_owned()),
+        (false, true) => Some("nonzero data after the terminator".to_owned()),
+        (false, false) => None,
+    }
 }
 
 /// Decode a policy while keeping its original bytes if any part cannot be interpreted.

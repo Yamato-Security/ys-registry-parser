@@ -11,7 +11,8 @@ First version. (@YamatoSecurity)
 
 ### Fixed
 - Recognize service recovery action code 4 (`SC_ACTION_OWN_RESTART`), seen on the Windows Task
-  Scheduler service. (#32) (@YamatoSecurity)
+  Scheduler service. Read single-string service dependencies and privileges. Ignore and report
+  nonzero data after a service list terminator. (#32) (@YamatoSecurity)
 - Network timestamps reject overflowing offsets, invalid dates and ambiguous/nonexistent DST
   times. Retain malformed network values and diagnose wrong types. (@YamatoSecurity)
 - Diagnose invalid LSA-secret update times and malformed cached-logon headers without exposing

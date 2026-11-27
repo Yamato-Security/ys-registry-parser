@@ -54,7 +54,9 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
   (`services`): display name, description, image path, service DLL (`Parameters\ServiceDll`),
   start, delayed start, type, error control, account, group, service SID type and per-user flags.
   Service dependencies, load-order group dependencies and required privileges keep their full
-  lists in registry order. `start_name`, `type_names` and `error_control_name` name the numeric values.
+  lists in registry order. A `REG_SZ` or `REG_EXPAND_SZ` list value supplies one literal name.
+  Nonzero data after the terminator is reported in `Service::problems`; the original bytes
+  are available through `Value::read_data()`. `start_name`, `type_names` and `error_control_name` name the numeric values.
 - Service recovery: `failure_actions.actions` contains one entry per declared failure, including
   repeated actions, their delays in milliseconds and an explicit final `none`. Windows repeats
   the last action on subsequent failures. For example, on Windows 11, `sc.exe qfailure AarSvc`
