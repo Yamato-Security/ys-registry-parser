@@ -10,6 +10,8 @@ First version. (@YamatoSecurity)
   copyright and the RPL License Notice. (@YamatoSecurity)
 
 ### Fixed
+- Recognize service recovery action code 4 (`SC_ACTION_OWN_RESTART`), seen on the Windows Task
+  Scheduler service. (#32) (@YamatoSecurity)
 - Network timestamps reject overflowing offsets, invalid dates and ambiguous/nonexistent DST
   times. Retain malformed network values and diagnose wrong types. (@YamatoSecurity)
 - Diagnose invalid LSA-secret update times and malformed cached-logon headers without exposing
@@ -44,6 +46,9 @@ First version. (@YamatoSecurity)
   (@YamatoSecurity)
 
 ### Added
+- Service records expose the recovery reboot message, non-crash failure flag, full dependency
+  and privilege lists, service SID type and per-user flags. Preserve extra bytes after a
+  declared failure-action array and report them alongside the decoded actions. (#32) (@YamatoSecurity)
 - `Hive`: a hive's base block (`Header`), its keys and values; `Hive::walk` (every key, depth
   first, each once, with its path) and `Hive::key` (a key by path, in any case).
 - `Key`: name, last-write time, flags, parent, class name, counts, subkeys (`lf`, `lh`, `li`, `ri`

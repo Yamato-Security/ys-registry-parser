@@ -52,11 +52,18 @@ edition; it needs Rust 1.99, has no dependencies and is not published to crates.
 - `SYSTEM` hives (`system`): the control sets `Select` names and those the hive has
   (`ControlSets`), the computer's name (`computer_name`), and a control set's services
   (`services`): display name, description, image path, service DLL (`Parameters\ServiceDll`),
-  start, delayed start, type, error control, account, group, failure command and failure
-  actions, each service with the problems its values have. `failure_actions` decodes a
-  `FailureActions` value (`SERVICE_FAILURE_ACTIONS`: reset period, whether a reboot message and a
-  command are set, then each action and its delay); `start_name`, `type_names` and
-  `error_control_name` name the numbers.
+  start, delayed start, type, error control, account, group, service SID type and per-user flags.
+  Service dependencies, load-order group dependencies and required privileges keep their full
+  lists in registry order. `start_name`, `type_names` and `error_control_name` name the numeric values.
+- Service recovery: `failure_actions.actions` contains one entry per declared failure, including
+  repeated actions, their delays in milliseconds and an explicit final `none`. Windows repeats
+  the last action on subsequent failures. For example, on Windows 11, `sc.exe qfailure AarSvc`
+  can print three restarts while the stored list has four entries: three restarts followed by
+  `none`. Task Scheduler can also store `own_restart` (Windows SDK action code 4).
+  The reset period is in seconds. The reboot message and failure command come from
+  separate registry values. `failure_actions_on_non_crash_failures` reports the stored setting
+  for recovery on a reported stop with an error. A missing value is `None`; the effective
+  setting on a running per-user service can differ from the value stored on its instance key.
 - Most-recently-used lists in `NTUSER.DAT` (`mru`): `mru_lists` gives every entry of `RunMRU`
   (lettered values in `MRUList` order, each command without its trailing `\1`), `TypedPaths`,
   `WordWheelQuery` (UTF-16 search terms in `MRUListEx` order), Internet Explorer's `TypedURLs`
