@@ -320,15 +320,17 @@ class WorkflowResultTests(unittest.TestCase):
                     cla.main()
         self.assertEqual(api.states(), ["error", "error"])
 
-    def test_bad_ignored_account_ids_fail_closed(self):
-        for bad in (["81847"], [True], [0], 81847):
+    def test_bad_policy_account_ids_fail_closed(self):
+        cases = [("ignored_coauthor_account_ids", bad) for bad in (["81847"], [True], [0], 81847)]
+        cases.extend(("owner_exempt_account_id", bad) for bad in ("43838376", True, 0, [43838376], None))
+        for field, bad in cases:
             api = FakeGitHub()
             api.related = [{"number": 7}]
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / ".github/cla").mkdir(parents=True)
                 (root / "CLA.md").write_bytes((ROOT / "CLA.md").read_bytes())
-                policy = {"schema_version": 1, **POLICY, "ignored_coauthor_account_ids": bad}
+                policy = {"schema_version": 1, **POLICY, field: bad}
                 (root / ".github/cla/policy.json").write_text(json.dumps(policy))
                 (root / ".github/cla/signatures.json").write_text('{"schema_version":1,"agreements":[]}')
                 with patch.object(cla, "ROOT", root), patch.object(cla, "GitHub", return_value=api), \
@@ -346,6 +348,39 @@ class WorkflowResultTests(unittest.TestCase):
         api = FakeGitHub()
         self.assertTrue(self.check(api, [agreement()])["ok"])
         self.assertEqual(api.states(), ["pending", "success"])
+
+    def test_owner_account_exception_in_trusted_policy(self):
+        policy = json.loads((ROOT / ".github/cla/policy.json").read_text())
+        owner_id = 43838376
+        self.assertEqual(policy["owner_exempt_account_id"], owner_id)
+        owner = actor(owner_id, login="renamed-owner")
+        def run(primary, coauthors=(), opener=None, shared=None, records=(), old_notice=False):
+            api = FakeGitHub(commits=[commit(primary, coauthors)])
+            api.data["user"] = opener or {"id": owner_id, "login": "renamed-owner"}
+            if shared:
+                api.related = [{"state": "open", "head": api.data["head"], "user": shared}]
+            if old_notice:
+                api.comments = [{"id": 8, "body": cla.MARKER + " old request",
+                                 "user": {"login": cla.BOT_LOGIN, "type": "Bot"}}]
+            result = cla.check_pr(api, "owner/repo", 7, registry(*records), policy, VERSION, "https://example.org/cla")
+            return api, result
+
+        api, result = run(owner, shared={"id": owner_id}, old_notice=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(api.states(), ["pending", "success"])
+        self.assertTrue(any(method == "PATCH" and "owner exception" in data["body"]
+                            for _, data, method in api.calls))
+        api, result = run(actor(20), [owner], opener={"id": 20}, records=[agreement((20,))])
+        self.assertTrue(result["ok"])
+        self.assertFalse(any(data and "body" in data for _, data, _ in api.calls))
+        impostor = actor(20, login="Shirofune-Security")
+        for _, result in [run(impostor), run(owner, [impostor]), run(owner, opener={"id": 20}),
+                          run(owner, shared={"id": 20})]:
+            self.assertFalse(result["ok"])
+            self.assertEqual(set(result["missing"]), {20})
+        _, result = run(actor(None, "43838376+Shirofune-Security@users.noreply.github.com"))
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["unresolved"])
 
     def test_failure_posts_one_instruction_comment(self):
         api = FakeGitHub()

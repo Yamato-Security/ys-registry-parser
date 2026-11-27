@@ -4,8 +4,10 @@ The `CLA` GitHub Actions workflow publishes the **`cla/required`** commit status
 It checks the PR opener, commit authors, and co-authors against
 [signatures.json](signatures.json) for the **exact version and SHA-256 of
 [CLA.md](../../CLA.md)**. First-time contributors need a verified record; later
-PRs can reuse it. Collaborators, maintainers, and bot accounts are not silently
-exempted.
+PRs can reuse it. The project owner's account, `@Shirofune-Security` (numeric ID
+`43838376`), has an explicit exception in the trusted branch's [policy.json](policy.json).
+It is separate from the verified signer registry. Every other PR opener, commit
+author and human co-author still needs coverage, including on PRs opened by the owner.
 
 ## Where to see who signed
 
@@ -88,9 +90,8 @@ an otherwise valid, irrevocable license grant.
 
 Adding a workflow alone does **not** prevent merges. An administrator must:
 
-1. Merge this setup PR. Review and register the initial maintainer acceptance(s)
-   before enabling the required check, so the first registry PR is not blocked
-   by an empty registry. Do not fabricate signatures or auto-approve owners.
+1. Merge this setup PR. The explicitly exempt owner can bootstrap the first registry PR.
+   Review and register other maintainers' acceptances before requiring the check on their contributions.
 2. Open **Actions → CLA → Run workflow** on the default branch. Leave the PR
    number empty to check every existing PR. It is normal for unregistered
    accounts to receive a failing status until verified records are added.
