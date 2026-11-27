@@ -332,9 +332,14 @@ pub fn services(hive: &Hive, set: u32) -> Option<(Vec<Service>, Vec<String>)> {
     Some((keys.iter().map(service).collect(), problems))
 }
 
-/// Read a service configuration list without collapsing it into a single string.
+/// Read a service configuration list without collapsing it into a single string. A list written
+/// as a string is its one string: installers write `DependOnService` that way, and the Service
+/// Control Manager reads it.
 fn service_list(value: &Value, slot: &mut Option<Vec<String>>) -> Option<String> {
-    if value.value_type() != ValueType::MultiSz {
+    if !matches!(
+        value.value_type(),
+        ValueType::MultiSz | ValueType::Sz | ValueType::ExpandSz
+    ) {
         return Some(format!(
             "is {}, not REG_MULTI_SZ",
             value.value_type().name()
@@ -344,11 +349,16 @@ fn service_list(value: &Value, slot: &mut Option<Vec<String>>) -> Option<String>
         Ok(bytes) => bytes,
         Err(why) => return Some(why),
     };
-    if let Data::MultiText { values, lossy } = decode(value.data_type(), &bytes) {
-        *slot = Some(values);
-        return lossy.then(|| "is not valid UTF-16: decoded lossily".to_owned());
-    }
-    Some("could not decode REG_MULTI_SZ".to_owned())
+    let (values, lossy) = match decode(value.data_type(), &bytes) {
+        Data::MultiText { values, lossy } => (values, lossy),
+        Data::Text { value, lossy } => (
+            (!value.is_empty()).then_some(value).into_iter().collect(),
+            lossy,
+        ),
+        _ => return Some("could not decode REG_MULTI_SZ".to_owned()),
+    };
+    *slot = Some(values);
+    lossy.then(|| "is not valid UTF-16: decoded lossily".to_owned())
 }
 
 /// Decode a policy while keeping its original bytes if any part cannot be interpreted.

@@ -353,7 +353,14 @@ fn service_lists_and_recovery_flags_preserve_empty_absent_and_invalid_values() {
     assert_eq!(empty.depend_on_service, None);
     assert_eq!(empty.problems, Vec::<String>::new());
 
+    // A list written as a REG_SZ (as some installers write DependOnService) is its one string.
+    data[privileges + 12..privileges + 16].copy_from_slice(&[b'A', 0, 0, 0]);
     data[privileges + 16..privileges + 20].copy_from_slice(&1u32.to_le_bytes());
+    let single = eventlog(data.clone());
+    assert_eq!(single.required_privileges, Some(vec!["A".to_owned()]));
+    assert_eq!(single.problems, Vec::<String>::new());
+
+    data[privileges + 16..privileges + 20].copy_from_slice(&4u32.to_le_bytes());
     data[flag + 16..flag + 20].copy_from_slice(&3u32.to_le_bytes());
     let invalid = eventlog(data);
     assert_eq!(invalid.required_privileges, None);
@@ -362,7 +369,7 @@ fn service_lists_and_recovery_flags_preserve_empty_absent_and_invalid_values() {
         invalid
             .problems
             .iter()
-            .any(|p| p == "RequiredPrivileges: is REG_SZ, not REG_MULTI_SZ")
+            .any(|p| p == "RequiredPrivileges: is REG_DWORD, not REG_MULTI_SZ")
     );
     assert!(
         invalid
