@@ -7,12 +7,16 @@ credentials, or data You do not have permission to share.
 
 ## Contributor License Agreement
 
-Before we merge contributed material, we require acceptance of the
+Before we merge third-party contributions, we require acceptance of the
 [ys-registry-parser Contributor License Agreement](CLA.md) (CLA) covering the rights being
 licensed, along with any additional authorizations or author consents required
 by section 5. This includes code, documentation, tests, and artwork. A bug report
 that only describes a problem and does not supply material for incorporation
 does not require a signature.
+
+The project owner's own contributions through `@Shirofune-Security` (GitHub account
+ID `43838376`) are exempt from the signature requirement. Other contributors on
+the same pull request must still be covered.
 
 The CLA gives **Zachary Mathis** and **Shirofune Security Co., Ltd.** independent
 permission to use and relicense Your Contributions, including in **paid,

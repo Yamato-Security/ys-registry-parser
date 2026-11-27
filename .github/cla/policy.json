@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "status_context": "cla/required",
+  "owner_exempt_account_id": 43838376,
   "ignored_coauthor_emails": [
     "noreply@anthropic.com"
   ],

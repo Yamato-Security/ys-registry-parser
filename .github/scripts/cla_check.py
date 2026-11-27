@@ -170,11 +170,17 @@ def required_accounts(opener, commits, aliases, ignored_coauthors, ignored_coaut
     return accounts, sorted(set(unresolved))
 
 
-def assess(opener, commits, registry, ignored_coauthors, ignored_coauthor_ids=frozenset()):
+def assess(opener, commits, registry, ignored_coauthors, ignored_coauthor_ids=frozenset(),
+           *, owner_id=None, shared_openers=()):
     approved, aliases = registry
     required, unresolved = required_accounts(opener, commits, aliases, ignored_coauthors,
                                              ignored_coauthor_ids)
-    missing = {user_id: login for user_id, login in required.items() if user_id not in approved}
+    for actor in shared_openers:
+        if not positive_id(actor.get("id")):
+            raise GateError("Unidentified PR opener for a shared head")
+        required[actor["id"]] = actor.get("login", str(actor["id"]))
+    missing = {user_id: login for user_id, login in required.items()
+               if user_id != owner_id and user_id not in approved}
     return {"ok": not missing and not unresolved, "missing": missing,
             "unresolved": unresolved, "required": required}
 
@@ -301,20 +307,13 @@ def check_pr(api, repo, number, registry, policy, version, document_url):
         commits = list(api.commits(repo, number))
         if not commits or len(commits) != pr.get("commits") or len({c["oid"] for c in commits}) != len(commits):
             raise GateError("Incomplete or changing PR commit list; recheck required")
-        result = assess(pr["user"], commits, registry,
-                        set(policy["ignored_coauthor_emails"]),
-                        set(policy.get("ignored_coauthor_account_ids", [])))
-        # Commit statuses are shared by PRs with the same head SHA. Do not let
-        # a signed opener's PR silently give an unsigned duplicate PR a green.
-        for other in api.pages(f"/repos/{repo}/pulls?state=open"):
-            if other.get("state") == "open" and other.get("head", {}).get("sha") == head:
-                actor = other["user"]
-                if not positive_id(actor.get("id")):
-                    raise GateError("Unidentified PR opener for a shared head")
-                result["required"][actor["id"]] = actor.get("login", str(actor["id"]))
-                if actor["id"] not in registry[0]:
-                    result["missing"][actor["id"]] = actor.get("login", str(actor["id"]))
-        result["ok"] = not result["missing"] and not result["unresolved"]
+        # A commit status also covers any other open PR with this head SHA.
+        shared_openers = (other["user"] for other in api.pages(f"/repos/{repo}/pulls?state=open")
+                          if other.get("state") == "open" and other.get("head", {}).get("sha") == head)
+        owner_id = policy.get("owner_exempt_account_id")
+        result = assess(pr["user"], commits, registry, set(policy["ignored_coauthor_emails"]),
+                        set(policy.get("ignored_coauthor_account_ids", [])),
+                        owner_id=owner_id, shared_openers=shared_openers)
     except GateError:
         if not api.dry_run:
             api.request(f"/repos/{repo}/statuses/{head}", {"state": "error", "context": policy["status_context"],
@@ -326,20 +325,26 @@ def check_pr(api, repo, number, registry, policy, version, document_url):
     if current["state"] != "open" or current["head"]["sha"] != head:
         return {"pr": number, "skipped": "head changed"}
     if not api.dry_run:
+        owner_covered = result["ok"] and owner_id in result["required"]
+        success_description = (f"CLA {version}: owner exception applied; other contributors checked" if owner_covered
+                               else f"CLA {version}: verified records cover listed authors")
         api.request(f"/repos/{repo}/statuses/{head}", {
             "state": "success" if result["ok"] else "failure", "context": policy["status_context"],
-            "description": f"CLA {version}: verified records cover listed authors" if result["ok"]
+            "description": success_description if result["ok"]
                            else f"CLA {version}: signature or maintainer verification needed",
             "target_url": document_url})
         body = notice(result, version, document_url, repo)
-        if body:
+        if body or owner_covered:
             previous = next((c for c in api.pages(f"/repos/{repo}/issues/{number}/comments")
                              if c.get("user", {}).get("login") == BOT_LOGIN
                              and c.get("user", {}).get("type") == "Bot"
                              and str(c.get("body", "")).startswith(MARKER)), None)
+            if previous and owner_covered:
+                body = (f"{MARKER}\nThe CLA check passed. The repository owner exception applies to "
+                        f"GitHub account ID {owner_id}. All other listed contributors meet the CLA requirement.\n\nby codex")
             if previous and previous["body"] != body:
                 api.request(f"/repos/{repo}/issues/comments/{previous['id']}", {"body": body}, method="PATCH")
-            elif not previous:
+            elif not previous and body:
                 api.request(f"/repos/{repo}/issues/{number}/comments", {"body": body})
     return {"pr": number, **result}
 
@@ -373,6 +378,8 @@ def main():
         if (not isinstance(policy.get("ignored_coauthor_emails"), list)
                 or not all(isinstance(x, str) and re.fullmatch(r"[^\s@*]+@[^\s@*]+", x) for x in policy["ignored_coauthor_emails"])):
             raise GateError("Ignored co-author metadata must use exact email addresses")
+        if "owner_exempt_account_id" in policy and not positive_id(policy["owner_exempt_account_id"]):
+            raise GateError("Owner exception must identify one numeric GitHub account ID")
         ignored_ids = policy.get("ignored_coauthor_account_ids", [])
         if not isinstance(ignored_ids, list) or not all(positive_id(x) for x in ignored_ids):
             raise GateError("Ignored co-author accounts must be numeric GitHub account IDs")
