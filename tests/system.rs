@@ -95,6 +95,16 @@ fn services_of_each_control_set() {
             error_control: Some(1),
             object_name: Some(r"NT AUTHORITY\LocalService".into()),
             group: Some("Event Log".into()),
+            required_privileges: Some(vec![
+                "SeChangeNotifyPrivilege".into(),
+                "SeImpersonatePrivilege".into()
+            ]),
+            depend_on_service: None,
+            depend_on_group: None,
+            service_sid_type: Some(1),
+            user_service_flags: None,
+            reboot_message: None,
+            failure_actions_on_non_crash_failures: Some(true),
             failure_command: None,
             failure_actions: event_log.failure_actions.clone(),
             failure_actions_raw: None,
@@ -267,6 +277,203 @@ fn win10_1709() -> Hive {
         .read_to_end(&mut data)
         .unwrap();
     open(data)
+}
+
+#[test]
+fn complete_service_recovery_lists_and_related_values() {
+    let hive = win10_1709();
+    let records = services(&hive, 1).unwrap().0;
+    let find = |name: &str| records.iter().find(|s| s.name == name).unwrap();
+    for (name, restarts, delay) in [("AarSvc", 3, 10_000), ("WSearch", 5, 30_000)] {
+        let mut expected = vec![
+            FailureAction {
+                action: Action::Restart,
+                delay_ms: delay
+            };
+            restarts
+        ];
+        expected.push(FailureAction {
+            action: Action::None,
+            delay_ms: 0,
+        });
+        let policy = find(name).failure_actions.as_ref().unwrap();
+        assert_eq!(policy.reset_period, 86_400);
+        assert_eq!(policy.actions, expected, "{name}");
+        assert_eq!(policy.trailing, 0);
+    }
+    let schedule = &find("Schedule").failure_actions.as_ref().unwrap().actions;
+    assert_eq!(
+        schedule[0],
+        FailureAction {
+            action: Action::OwnRestart,
+            delay_ms: 0
+        }
+    );
+    assert_eq!(schedule[0].action.name(), "own_restart");
+    assert_eq!(find("AarSvc").user_service_flags, Some(3));
+    assert_eq!(find("AarSvc").failure_actions_on_non_crash_failures, None);
+    assert_eq!(
+        find("WSearch").failure_actions_on_non_crash_failures,
+        Some(true)
+    );
+    assert_eq!(
+        find("WSearch").depend_on_service.as_ref().unwrap(),
+        &["RPCSS", "BrokerInfrastructure"]
+    );
+    assert_eq!(
+        find("cdfs").depend_on_group.as_ref().unwrap(),
+        &["SCSI CDROM Class"]
+    );
+    let service = find("MSiSCSI");
+    assert_eq!(service.reboot_message.as_deref(), Some("See Note 3 below"));
+    assert_eq!(service.failure_command.as_deref(), Some("customScript.cmd"));
+}
+
+#[test]
+fn service_lists_and_recovery_flags_preserve_empty_absent_and_invalid_values() {
+    let path = r"ControlSet001\Services\eventlog";
+    let mut data = system_bytes();
+    let flag = value_offset(&data, path, "FailureActionsOnNonCrashFailures");
+    let privileges = value_offset(&data, path, "RequiredPrivileges");
+    data[flag + 12..flag + 16].copy_from_slice(&0u32.to_le_bytes());
+    // An inline, empty REG_MULTI_SZ (two UTF-16 NULs).
+    data[privileges + 8..privileges + 12].copy_from_slice(&0x8000_0004u32.to_le_bytes());
+    data[privileges + 12..privileges + 16].fill(0);
+    let eventlog = |bytes| {
+        services(&open(bytes), 1)
+            .unwrap()
+            .0
+            .into_iter()
+            .find(|s| s.name == "eventlog")
+            .unwrap()
+    };
+    let empty = eventlog(data.clone());
+    assert_eq!(empty.failure_actions_on_non_crash_failures, Some(false));
+    assert_eq!(empty.required_privileges, Some(vec![]));
+    assert_eq!(empty.depend_on_service, None);
+    assert_eq!(empty.problems, Vec::<String>::new());
+
+    // A list written as a REG_SZ (as some installers write DependOnService) is its one string.
+    data[privileges + 12..privileges + 16].copy_from_slice(&[b'A', 0, 0, 0]);
+    data[privileges + 16..privileges + 20].copy_from_slice(&1u32.to_le_bytes());
+    let single = eventlog(data.clone());
+    assert_eq!(single.required_privileges, Some(vec!["A".to_owned()]));
+    assert_eq!(single.problems, Vec::<String>::new());
+
+    data[privileges + 16..privileges + 20].copy_from_slice(&4u32.to_le_bytes());
+    data[flag + 16..flag + 20].copy_from_slice(&3u32.to_le_bytes());
+    let invalid = eventlog(data);
+    assert_eq!(invalid.required_privileges, None);
+    assert_eq!(invalid.failure_actions_on_non_crash_failures, None);
+    assert!(invalid.problems.iter().any(|p| p
+        == "RequiredPrivileges: expected REG_MULTI_SZ, REG_SZ or REG_EXPAND_SZ; found REG_DWORD"));
+    assert!(
+        invalid
+            .problems
+            .iter()
+            .any(|p| p == "FailureActionsOnNonCrashFailures: is REG_BINARY, not REG_DWORD")
+    );
+    assert_eq!(invalid.failure_actions.unwrap().actions.len(), 3);
+}
+
+#[test]
+fn service_lists_stop_at_the_windows_terminator_for_each_storage_type() {
+    let original = system_bytes();
+    // Exercise all three fields through services(), using the existing fixture's data cells.
+    let fields = [
+        ("LanmanWorkstation", "DependOnService"),
+        ("cdfs", "DependOnGroup"),
+        ("eventlog", "RequiredPrivileges"),
+    ];
+    let cells = fields.map(|(service, field)| {
+        value_offset(
+            &original,
+            &format!(r"ControlSet001\Services\{service}"),
+            field,
+        )
+    });
+    // The optional raw bytes allow testing broken UTF-16 and odd lengths as well.
+    for (kind, stored, extra, expected, diagnostic) in [
+        (1_u32, "Winmgmt\0", &[][..], vec!["Winmgmt"], None),
+        (2, "%Svc%\0", &[], vec!["%Svc%"], None),
+        (2, "\0", &[], vec![], None),
+        (7, "A\0A\0B\0\0\0", &[], vec!["A", "A", "B"], None),
+        (7, "A\0B", &[], vec!["A", "B"], None),
+        (7, "A\0\0B\0", &[], vec!["A"], Some("after the terminator")),
+        (7, "\0B\0", &[], vec![], Some("after the terminator")),
+        (1, "A\0B\0", &[], vec!["A"], Some("after the terminator")),
+        (2, "A\0B\0", &[], vec!["A"], Some("after the terminator")),
+        (7, "A", &[0, 0xd8], vec!["A�"], Some("decoded lossily")),
+        (1, "A", &[0xff], vec!["A"], Some("decoded lossily")),
+        (
+            7,
+            "A\0\0",
+            &[0xff],
+            vec!["A"],
+            Some("invalid UTF-16 and nonzero data"),
+        ),
+    ] {
+        let mut data = original.clone();
+        let mut bytes: Vec<_> = stored.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        bytes.extend_from_slice(extra);
+        for &vk in &cells {
+            let size = u32::from_le_bytes(data[vk + 8..vk + 12].try_into().unwrap());
+            assert!(size < 0x8000_0000 && bytes.len() <= size as usize);
+            let start =
+                4100 + u32::from_le_bytes(data[vk + 12..vk + 16].try_into().unwrap()) as usize;
+            data[start..start + bytes.len()].copy_from_slice(&bytes);
+            data[vk + 8..vk + 12].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+            data[vk + 16..vk + 20].copy_from_slice(&kind.to_le_bytes());
+        }
+        let records = services(&open(data), 1).unwrap().0;
+        for (name, field) in fields {
+            let service = records.iter().find(|s| s.name == name).unwrap();
+            let items = match field {
+                "DependOnService" => &service.depend_on_service,
+                "DependOnGroup" => &service.depend_on_group,
+                _ => &service.required_privileges,
+            };
+            assert_eq!(items.as_ref().unwrap(), &expected, "{field}: {stored:?}");
+            let diagnostics: Vec<_> = service
+                .problems
+                .iter()
+                .filter(|p| p.starts_with(field))
+                .collect();
+            assert_eq!(
+                diagnostics.len(),
+                usize::from(diagnostic.is_some()),
+                "{field}: {stored:?}"
+            );
+            if let Some(message) = diagnostic {
+                assert!(diagnostics[0].contains(message), "{field}: {diagnostics:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn extra_bytes_are_preserved_without_inventing_an_action() {
+    let mut data = system_bytes();
+    let path = r"ControlSet001\Services\eventlog";
+    let vk = value_offset(&data, path, "FailureActions");
+    let blob = 4096 + u32::from_le_bytes(data[vk + 12..vk + 16].try_into().unwrap()) as usize + 4;
+    data[blob + 12..blob + 16].copy_from_slice(&2u32.to_le_bytes());
+    let raw = data[blob..blob + 44].to_vec();
+    let svc = services(&open(data), 1)
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|s| s.name == "eventlog")
+        .unwrap();
+    assert_eq!(svc.failure_actions_raw.as_ref(), Some(&raw));
+    let policy = svc.failure_actions.unwrap();
+    assert_eq!(policy.actions.len(), 2);
+    assert_eq!(policy.trailing, 8);
+    assert!(
+        svc.problems
+            .iter()
+            .any(|p| p.contains("8 bytes after the declared actions"))
+    );
 }
 
 #[test]

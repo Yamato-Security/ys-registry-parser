@@ -16,8 +16,8 @@
 //! the Background and Desktop Activity Moderators recorded it (`bam`).
 //!
 //! A service's `FailureActions` is a `SERVICE_FAILURE_ACTIONS` as the Service Control Manager
-//! writes it: the reset period, two fields that say whether a reboot message and a command are
-//! set (the strings are the `RebootMessage` and `FailureCommand` values), the number of actions,
+//! writes it: the reset period, two markers for a reboot message and a command
+//! (the strings, when present, are separate registry values), the number of actions,
 //! a serialized pointer field that is not needed to locate the stored actions, then the
 //! `SC_ACTION`s (type and delay in milliseconds), 8 bytes each.
 
@@ -164,13 +164,13 @@ pub struct FailureActions {
     /// Seconds without a failure after which the failure count goes back to 0; `u32::MAX`:
     /// never.
     pub reset_period: u32,
-    /// Whether a reboot message is set (the `RebootMessage` value).
+    /// Nonzero reboot-message marker in the blob. Read [`Service::reboot_message`] for the text.
     pub reboot_message_set: bool,
-    /// Whether a command is set (the `FailureCommand` value).
+    /// Nonzero command marker in the blob. The separate `FailureCommand` may still be absent.
     pub command_set: bool,
     /// The action for the first failure, the second, …; the last one for every failure after.
     pub actions: Vec<FailureAction>,
-    /// Bytes past the actions, which Windows doesn't write.
+    /// Byte count after the declared array. These bytes are not additional actions.
     pub trailing: usize,
 }
 
@@ -194,7 +194,9 @@ pub enum Action {
     Reboot,
     /// `SC_ACTION_RUN_COMMAND`: run the `FailureCommand`.
     RunCommand,
-    /// A type Windows doesn't define.
+    /// `SC_ACTION_OWN_RESTART` (Windows SDK value 4).
+    OwnRestart,
+    /// An unrecognized action type, preserved by its numeric code.
     Other(u32),
 }
 
@@ -207,11 +209,12 @@ impl Action {
             1 => Action::Restart,
             2 => Action::Reboot,
             3 => Action::RunCommand,
+            4 => Action::OwnRestart,
             other => Action::Other(other),
         }
     }
 
-    /// `none`, `restart`, `reboot`, `run_command`; others in hex.
+    /// The Windows SDK action name in lowercase, without the `SC_ACTION_` prefix; unknown codes in hex.
     #[must_use]
     pub fn name(self) -> String {
         match self {
@@ -219,6 +222,7 @@ impl Action {
             Action::Restart => "restart".to_owned(),
             Action::Reboot => "reboot".to_owned(),
             Action::RunCommand => "run_command".to_owned(),
+            Action::OwnRestart => "own_restart".to_owned(),
             Action::Other(code) => format!("0x{code:x}"),
         }
     }
@@ -292,11 +296,26 @@ pub struct Service {
     pub object_name: Option<String>,
     /// `Group`: its load order group.
     pub group: Option<String>,
+    /// `RequiredPrivileges`: the ordered privilege names, including an explicitly empty list.
+    pub required_privileges: Option<Vec<String>>,
+    /// `DependOnService`: the ordered service dependencies.
+    pub depend_on_service: Option<Vec<String>>,
+    /// `DependOnGroup`: the ordered load-order group dependencies.
+    pub depend_on_group: Option<Vec<String>>,
+    /// `ServiceSidType`: the stored service SID type.
+    pub service_sid_type: Option<u32>,
+    /// `UserServiceFlags`: the stored per-user service flags.
+    pub user_service_flags: Option<u32>,
+    /// `RebootMessage`: text or a localized resource reference, as stored.
+    pub reboot_message: Option<String>,
+    /// `FailureActionsOnNonCrashFailures`: also queue recovery when a service reports a
+    /// stopped state with a nonzero exit code. Absent values remain `None`.
+    pub failure_actions_on_non_crash_failures: Option<bool>,
     /// `FailureCommand`: what the `run_command` action runs.
     pub failure_command: Option<String>,
     /// `FailureActions`, decoded.
     pub failure_actions: Option<FailureActions>,
-    /// `FailureActions`' bytes, when they don't decode.
+    /// Original bytes when decoding fails or data follows the declared actions.
     pub failure_actions_raw: Option<Vec<u8>>,
     /// Whether the transaction logs' replay wrote the key or one of its values.
     pub replayed: bool,
@@ -311,6 +330,85 @@ pub fn services(hive: &Hive, set: u32) -> Option<(Vec<Service>, Vec<String>)> {
     let key = hive.key(&format!(r"{}\Services", control_set_name(set)))?;
     let (keys, problems) = key.subkeys();
     Some((keys.iter().map(service).collect(), problems))
+}
+
+/// Read a service configuration list without collapsing it into a single string. A list written
+/// as a string is its one string: installers write `DependOnService` that way, and the Service
+/// Control Manager reads it.
+fn service_list(value: &Value, slot: &mut Option<Vec<String>>) -> Option<String> {
+    if !matches!(
+        value.value_type(),
+        ValueType::MultiSz | ValueType::Sz | ValueType::ExpandSz
+    ) {
+        return Some(format!(
+            "expected REG_MULTI_SZ, REG_SZ or REG_EXPAND_SZ; found {}",
+            value.value_type().name()
+        ));
+    }
+    let bytes = match value.data() {
+        Ok(bytes) => bytes,
+        Err(why) => return Some(why),
+    };
+    // A scalar ends at its first NUL. A list ends at its first empty element.
+    // Keep this rule local: other registry artifacts can use empty elements as data.
+    let multi = value.value_type() == ValueType::MultiSz;
+    let mut at_item_start = true;
+    let mut end = bytes.len();
+    for (index, &unit) in bytes.as_chunks::<2>().0.iter().enumerate() {
+        let nul = unit == [0, 0];
+        if nul && (!multi || at_item_start) {
+            end = (index + 1) * 2;
+            break;
+        }
+        at_item_start = nul;
+    }
+    let (values, lossy) = match decode(value.data_type(), &bytes[..end]) {
+        Data::MultiText { values, lossy } => (values, lossy),
+        Data::Text { value, lossy } => (
+            (!value.is_empty()).then_some(value).into_iter().collect(),
+            lossy,
+        ),
+        _ => return Some("could not decode service list".to_owned()),
+    };
+    *slot = Some(values);
+    let malformed = lossy || !bytes.len().is_multiple_of(2);
+    let trailing = bytes[end..].iter().any(|b| *b != 0);
+    match (malformed, trailing) {
+        (true, true) => Some("invalid UTF-16 and nonzero data after the terminator".to_owned()),
+        (true, false) => Some("is not valid UTF-16: decoded lossily".to_owned()),
+        (false, true) => Some("nonzero data after the terminator".to_owned()),
+        (false, false) => None,
+    }
+}
+
+/// Decode a policy while keeping its original bytes if any part cannot be interpreted.
+fn read_failure_actions(value: &Value, service: &mut Service, problems: &mut Vec<String>) {
+    let (bytes, read_problem) = value.read_data();
+    let why = read_problem.or_else(|| {
+        (value.value_type() != ValueType::Binary)
+            .then(|| format!("is {}, not REG_BINARY", value.value_type().name()))
+    });
+    if let Some(why) = why {
+        problems.push(format!("FailureActions: {why}"));
+        service.failure_actions_raw = Some(bytes);
+        return;
+    }
+    match failure_actions(&bytes) {
+        Ok(actions) => {
+            if actions.trailing != 0 {
+                problems.push(format!(
+                    "FailureActions: {} bytes after the declared actions",
+                    actions.trailing
+                ));
+                service.failure_actions_raw = Some(bytes);
+            }
+            service.failure_actions = Some(actions);
+        }
+        Err(why) => {
+            problems.push(why);
+            service.failure_actions_raw = Some(bytes);
+        }
+    }
 }
 
 /// The service whose key is `key`.
@@ -336,6 +434,7 @@ fn service(key: &Key) -> Service {
             why
         };
         let num = |slot: &mut Option<u32>| number(value).map(|n| *slot = Some(n)).err();
+        let flag = |slot: &mut Option<bool>| number(value).map(|n| *slot = Some(n != 0)).err();
         match name.to_ascii_lowercase().as_str() {
             "displayname" => problem(text(&mut s.display_name)),
             "description" => problem(text(&mut s.description)),
@@ -343,36 +442,21 @@ fn service(key: &Key) -> Service {
             "servicedll" => problem(text(&mut s.service_dll)),
             "objectname" => problem(text(&mut s.object_name)),
             "group" => problem(text(&mut s.group)),
+            "requiredprivileges" => problem(service_list(value, &mut s.required_privileges)),
+            "dependonservice" => problem(service_list(value, &mut s.depend_on_service)),
+            "dependongroup" => problem(service_list(value, &mut s.depend_on_group)),
+            "servicesidtype" => problem(num(&mut s.service_sid_type)),
+            "userserviceflags" => problem(num(&mut s.user_service_flags)),
+            "rebootmessage" => problem(text(&mut s.reboot_message)),
             "failurecommand" => problem(text(&mut s.failure_command)),
             "start" => problem(num(&mut s.start)),
             "type" => problem(num(&mut s.service_type)),
             "errorcontrol" => problem(num(&mut s.error_control)),
-            "delayedautostart" => {
-                problem(
-                    number(value)
-                        .map(|n| s.delayed_autostart = Some(n != 0))
-                        .err(),
-                );
+            "delayedautostart" => problem(flag(&mut s.delayed_autostart)),
+            "failureactionsonnoncrashfailures" => {
+                problem(flag(&mut s.failure_actions_on_non_crash_failures));
             }
-            "failureactions" => {
-                let (bytes, read_problem) = value.read_data();
-                let why = read_problem.or_else(|| {
-                    (value.value_type() != ValueType::Binary)
-                        .then(|| format!("is {}, not REG_BINARY", value.value_type().name()))
-                });
-                if let Some(why) = why {
-                    problems.push(format!("FailureActions: {why}"));
-                    s.failure_actions_raw = Some(bytes);
-                } else {
-                    match failure_actions(&bytes) {
-                        Ok(actions) => s.failure_actions = Some(actions),
-                        Err(why) => {
-                            problems.push(why);
-                            s.failure_actions_raw = Some(bytes);
-                        }
-                    }
-                }
-            }
+            "failureactions" => read_failure_actions(value, &mut s, &mut problems),
             _ => {}
         }
     }
