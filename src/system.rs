@@ -354,7 +354,7 @@ fn service_list(value: &Value, slot: &mut Option<Vec<String>>) -> Option<String>
     let multi = value.value_type() == ValueType::MultiSz;
     let mut at_item_start = true;
     let mut end = bytes.len();
-    for (index, unit) in bytes.chunks_exact(2).enumerate() {
+    for (index, &unit) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let nul = unit == [0, 0];
         if nul && (!multi || at_item_start) {
             end = (index + 1) * 2;
